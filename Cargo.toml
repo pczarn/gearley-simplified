@@ -1,0 +1,16 @@
+[package]
+
+name = "gearley-simplified"
+version = "0.0.1"
+authors = [ "pioczarn@gmail.com" ]
+
+[lib]
+name = "gearley"
+
+[dependencies]
+ref_slice = "0.1"
+optional = "0.0.12"
+bit-vec = "0.4"
+
+[dependencies.cfg]
+path = "../cfg/"

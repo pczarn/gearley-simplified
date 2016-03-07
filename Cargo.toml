@@ -6,11 +6,7 @@ authors = [ "pioczarn@gmail.com" ]
 
 [lib]
 name = "gearley"
+crate_type = ["lib"]
 
 [dependencies]
-ref_slice = "0.1"
-optional = "0.0.12"
-bit-vec = "0.4"
-
-[dependencies.cfg]
-path = "../cfg/"
+cfg = "0.2"

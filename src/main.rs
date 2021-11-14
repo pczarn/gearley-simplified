@@ -5,6 +5,7 @@ use std::convert::AsRef;
 use std::cmp;
 use std::mem;
 use std::collections::{BTreeSet, BTreeMap};
+use std::iter;
 
 use bit_vec::BitVec;
 use binary_heap_plus::BinaryHeap;
@@ -27,6 +28,7 @@ struct BinarizedGrammar {
 struct Rule {
     lhs: Symbol,
     rhs: Vec<Symbol>,
+    id: usize,
 }
 
 #[derive(Clone)]
@@ -45,6 +47,8 @@ struct SymbolSource {
 
 struct RuleBuilder<'a> {
     lhs: Symbol,
+    rhs: Option<Vec<Symbol>>,
+    id: Option<usize>,
     grammar: &'a mut Grammar,
 }
 
@@ -124,7 +128,7 @@ enum MaybePostdot {
     Unary,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct NodeHandle(usize);
 
 impl PartialEq for CompletedItem {
@@ -164,6 +168,10 @@ impl SymbolSource {
         self.symbol_names.push(name.to_owned());
         result
     }
+
+    fn make_n_symbols<F>(&mut self, count: usize, mut f: F) -> Vec<Symbol> where F: FnMut() -> String {
+        (0..count).map(|_| self.make_symbol(&f()[..])).collect()
+    }
 }
 
 impl EarleySet {
@@ -189,7 +197,7 @@ impl Grammar {
     }
 
     fn rule(&mut self, lhs: Symbol) -> RuleBuilder {
-        RuleBuilder { grammar: self, lhs }
+        RuleBuilder { grammar: self, lhs, rhs: None, id: None }
     }
 
     fn start_symbol(&mut self, symbol: Symbol) {
@@ -199,7 +207,7 @@ impl Grammar {
     fn binarize(&self) -> BinarizedGrammar {
         let mut gensym_n = 0;
         let mut symbol_source = self.symbol_source.clone();
-        let binarized_rules = self.rules.iter().enumerate().flat_map(|(rule_id, rule)| {
+        let binarized_rules = self.rules.iter().flat_map(|rule| {
             // Rewrite to a set of binarized rules.
             // From `LHS ⸬= A B C … X Y Z` to:
             // ____________________
@@ -218,44 +226,30 @@ impl Grammar {
                         lhs: rule.lhs,
                         rhs0: rule.rhs[0],
                         rhs1: None,
-                        source: Some(rule_id),
-                    });
-                }
-                2 => {
-                    rules.push(BinarizedRule {
-                        lhs: rule.lhs,
-                        rhs0: rule.rhs[0],
-                        rhs1: Some(rule.rhs[1]),
-                        source: Some(rule_id),
+                        source: Some(rule.id),
                     });
                 }
                 rhs_count => {
-                    let num_additional_rules = rhs_count.saturating_sub(3);
-                    let mut next_sym = symbol_source.make_symbol(&format!("g{}", gensym_n));
-                    gensym_n += 1;
-                    rules.push(BinarizedRule {
-                        lhs: next_sym,
-                        rhs0: rule.rhs[0],
-                        rhs1: Some(rule.rhs[1]),
-                        source: None,
-                    });
-                    for i in 0..num_additional_rules {
-                        let next_sym_2 = symbol_source.make_symbol(&format!("g{}", gensym_n));
+                    let num_additional_symbols = rhs_count - 2;
+                    let gensyms = symbol_source.make_n_symbols(num_additional_symbols, || {
+                        let sym_name = format!("g{}", gensym_n);
                         gensym_n += 1;
-                        rules.push(BinarizedRule {
-                            lhs: next_sym_2,
-                            rhs0: next_sym,
-                            rhs1: Some(rule.rhs[2 + i]),
-                            source: None,
-                        });
-                        next_sym = next_sym_2;
-                    }
-                    rules.push(BinarizedRule {
-                        lhs: rule.lhs,
-                        rhs0: next_sym,
-                        rhs1: Some(rule.rhs.last().cloned().unwrap()),
-                        source: Some(rule_id),
+                        sym_name
                     });
+                    let lhs_iter = gensyms.iter().cloned().chain(iter::once(rule.lhs));
+                    let mut rhs1_iter = rule.rhs.iter().cloned();
+                    let rhs0_iter = rhs1_iter.next().into_iter().chain(gensyms.iter().cloned());
+
+                    rules.extend(
+                        lhs_iter.zip(rhs0_iter).zip(rhs1_iter).map(|((lhs, rhs0), rhs1)| {
+                            BinarizedRule {
+                                lhs,
+                                rhs0,
+                                rhs1: Some(rhs1),
+                                source: if lhs == rule.lhs { Some(rule.id) } else { None },
+                            }
+                        })
+                    );
                 }
             }
             rules.into_iter()
@@ -275,12 +269,23 @@ impl BinarizedGrammar {
 }
 
 impl<'a> RuleBuilder<'a> {
-    fn rhs<R>(self, rhs: R) where R: AsRef<[Symbol]> {
+    fn rhs<R>(mut self, rhs: R) -> Self where R: AsRef<[Symbol]> {
         assert!(rhs.as_ref().len() > 0, "empty rules are not accepted");
+        self.rhs = Some(rhs.as_ref().to_vec());
+        self
+    }
+
+    fn id(mut self, id: usize) -> Self {
+        self.id = Some(id);
+        self
+    }
+
+    fn build(self) {
         self.grammar.rules.push(
             Rule {
                 lhs: self.lhs,
-                rhs: rhs.as_ref().to_vec(),
+                rhs: self.rhs.unwrap(),
+                id: self.id.unwrap_or(self.grammar.rules.len()),
             }
         );
     }
@@ -326,6 +331,12 @@ impl Recognizer {
         //     predicted: self.tables.prediction_matrix[self.tables.start_symbol.usize()].clone(),
         //     medial: vec![],
         // });
+        let es = EarleySet {
+            predicted: self.tables.prediction_matrix[self.tables.start_symbol.usize()].clone(),
+            medial: vec![],
+        };
+        // self.earley_chart.push(mem::replace(&mut self.next_set, EarleySet::new(self.tables.num_syms)));
+        self.earley_chart.push(es);
     }
 
     fn begin_earleme(&mut self) {
@@ -353,25 +364,30 @@ impl Recognizer {
     }
 
     fn is_exhausted(&self) -> bool {
-        self.earley_chart.last().unwrap().medial.len() == 0 && self.complete.is_empty()
+        self.next_set.medial.len() == 0 && self.complete.is_empty()
     }
 
     fn complete_all_sums_entirely(&mut self) {
         while let Some(&ei) = self.complete.peek() {
             let lhs_sym = self.tables.get_lhs(ei.dot);
             while let Some(&ei2) = self.complete.peek() {
+                // println!("complete sums {} ::= {} {:?} {}",
+                //     &self.tables.symbol_names[self.tables.get_lhs(ei2.dot).usize()],
+                //     &self.tables.symbol_names[self.tables.get_rhs0(ei2.dot).unwrap().usize()],
+                //     self.tables.get_rhs1(ei2.dot).map(|rhs1| &self.tables.symbol_names[rhs1.usize()]), ei2.origin);
                 if ei.origin == ei2.origin && lhs_sym == self.tables.get_lhs(ei2.dot) {
                     self.forest.push_summand(ei2);
                     self.complete.pop();
                 } else {
-                    let node = self.forest.sum(lhs_sym, ei.origin);
-                    if ei.origin == 0 && lhs_sym == self.tables.start_symbol {
-                        self.finished_node = Some(node);
-                    }
-                    self.complete(ei.origin, lhs_sym, node);
+                    // println!("complete");
                     break;
                 }
             }
+            let node = self.forest.sum(lhs_sym, ei.origin);
+            if ei.origin == 0 && lhs_sym == self.tables.start_symbol {
+                self.finished_node = Some(node);
+            }
+            self.complete(ei.origin, lhs_sym, node);
         }
     }
 
@@ -380,8 +396,7 @@ impl Recognizer {
         let tables = &self.tables;
         // Build index by postdot
         // These medial positions themselves are sorted by postdot symbol.
-        let current_earley_set = self.earley_chart.last_mut().unwrap();
-        current_earley_set.medial.sort_unstable_by(|a, b| {
+        self.next_set.medial.sort_unstable_by(|a, b| {
             (tables.get_rhs1_cmp(a.dot), a.dot, a.origin).cmp(&(
                 tables.get_rhs1_cmp(b.dot),
                 b.dot,
@@ -391,12 +406,10 @@ impl Recognizer {
     }
 
     fn prediction_pass(&mut self) {
-        let last = self.earley_chart.len() - 1;
-        let (before, after) = self.earley_chart.split_at_mut(last);
         // Iterate through medial items in the current set.
-        let iter = before.last().unwrap().medial.iter();
+        let iter = self.next_set.medial.iter();
         // For each medial item in the current set, predict its postdot symbol.
-        let destination = &mut after.last_mut().unwrap().predicted;
+        let destination = &mut self.next_set.predicted;
         for ei in iter {
             let postdot = if let Some(rhs1) = self.tables.get_rhs1(ei.dot) {
                 rhs1
@@ -454,6 +467,7 @@ impl Recognizer {
                 // No checks for uniqueness, because `medial` will be deduplicated.
                 // from A ::= • B
                 // to   A ::=   B •
+                println!("complete {} ::= {}", self.tables.symbol_names[trans.symbol.usize()], self.tables.symbol_names[symbol.usize()]);
                 self.complete.push(CompletedItem {
                     origin: earleme,
                     dot: trans.dot,
@@ -471,7 +485,7 @@ impl Recognizer {
                 // from A ::= • B   C
                 // to   A ::=   B • C
                 // Where C is terminal or nonterminal.
-                self.earley_chart.last_mut().unwrap().medial.push(Item {
+                self.next_set.medial.push(Item {
                     origin: earleme,
                     dot: trans.dot,
                     node: node,
@@ -489,16 +503,7 @@ impl Recognizer {
     }
 
     fn log_last_earley_set(&self) {
-        let mut dots: BTreeMap<usize, BTreeMap<usize, BTreeSet<usize>>> = BTreeMap::new();
-        let es = self.earley_chart.last().unwrap();
-        for (i, rule) in self.tables.rules.iter().enumerate() {
-            if es.predicted[rule.lhs.usize()] {
-                dots.entry(i).or_insert(BTreeMap::new()).entry(0).or_insert(BTreeSet::new()).insert(self.earleme());
-            }
-        }
-        for item in &es.medial {
-            dots.entry(item.dot).or_insert(BTreeMap::new()).entry(1).or_insert(BTreeSet::new()).insert(item.origin);
-        }
+        let dots = self.dots_for_log(self.earley_chart.last().unwrap());
         for (rule_id, dots) in dots {
             print!("{} ::= ", self.tables.symbol_names[self.tables.get_lhs(rule_id).usize()]);
             if let Some(origins) = dots.get(&0) {
@@ -514,6 +519,73 @@ impl Recognizer {
             println!();
         }
         println!();
+    }
+
+    fn log_earley_set_diff(&self) {
+        let dots_last_by_id = self.dots_for_log(self.earley_chart.last().unwrap());
+        let mut dots_next_by_id = self.dots_for_log(&self.next_set);
+        let mut rule_ids: BTreeSet<usize> = BTreeSet::new();
+        rule_ids.extend(dots_last_by_id.keys());
+        rule_ids.extend(dots_next_by_id.keys());
+        for item in self.complete.iter() {
+            let position = if self.tables.get_rhs1(item.dot).is_some() { 2 } else { 1 };
+            dots_next_by_id.entry(item.dot).or_insert(BTreeMap::new()).entry(position).or_insert(BTreeSet::new()).insert(item.origin);
+        }
+        let mut empty_diff = true;
+        for rule_id in rule_ids {
+            let dots_last = dots_last_by_id.get(&rule_id);
+            let dots_next = dots_next_by_id.get(&rule_id);
+            if dots_last == dots_next {
+                continue;
+            }
+            empty_diff = false;
+            print!("from {} ::= ", self.tables.symbol_names[self.tables.get_lhs(rule_id).usize()]);
+            if let Some(origins) = dots_last.and_then(|d| d.get(&0)) {
+                print!("{:?}", origins);
+            }
+            print!(" {} ", self.tables.symbol_names[self.tables.get_rhs0(rule_id).unwrap().usize()]);
+            if let Some(origins) = dots_last.and_then(|d| d.get(&1)) {
+                print!("{:?}", origins);
+            }
+            if let Some(rhs1) = self.tables.get_rhs1(rule_id) {
+                print!(" {} ", self.tables.symbol_names[rhs1.usize()]);
+            }
+            println!();
+            print!("to   {} ::= ", self.tables.symbol_names[self.tables.get_lhs(rule_id).usize()]);
+            if let Some(origins) = dots_next.and_then(|d| d.get(&0)) {
+                print!("{:?}", origins);
+            }
+            print!(" {} ", self.tables.symbol_names[self.tables.get_rhs0(rule_id).unwrap().usize()]);
+            if let Some(origins) = dots_next.and_then(|d| d.get(&1)) {
+                print!("{:?}", origins);
+            }
+            if let Some(rhs1) = self.tables.get_rhs1(rule_id) {
+                print!(" {} ", self.tables.symbol_names[rhs1.usize()]);
+            }
+            if let Some(origins) = dots_next.and_then(|d| d.get(&2)) {
+                print!("{:?}", origins);
+            }
+            println!();
+        }
+        if empty_diff {
+            println!("no diff");
+            println!();
+        } else {
+            println!();
+        }
+    }
+
+    fn dots_for_log(&self, es: &EarleySet) -> BTreeMap<usize, BTreeMap<usize, BTreeSet<usize>>> {
+        let mut dots = BTreeMap::new();
+        for (i, rule) in self.tables.rules.iter().enumerate() {
+            if es.predicted[rule.lhs.usize()] {
+                dots.entry(i).or_insert(BTreeMap::new()).entry(0).or_insert(BTreeSet::new()).insert(self.earleme());
+            }
+        }
+        for item in &es.medial {
+            dots.entry(item.dot).or_insert(BTreeMap::new()).entry(1).or_insert(BTreeSet::new()).insert(item.origin);
+        }
+        dots
     }
 }
 
@@ -626,39 +698,6 @@ impl Forest {
         }
     }
 
-    fn evaluate<T, F, G>(&mut self, finished_node: NodeHandle, eval_product: F, eval_leaf: G) -> T
-        where F: Fn(u32, &[T]) -> T + Copy,
-              G: Fn(Symbol, u32) -> T + Copy,
-              T: Copy
-    {
-        self.evaluate_rec(finished_node, eval_product, eval_leaf)[0]
-    }
-
-    fn evaluate_rec<T, F, G>(&mut self, handle: NodeHandle, eval_product: F, eval_leaf: G) -> Vec<T>
-        where F: Fn(u32, &[T]) -> T + Copy,
-              G: Fn(Symbol, u32) -> T + Copy,
-              T: Copy
-    {
-        match &self.graph[handle.0] {
-            &Node::Sum { ref summands, .. } => {
-                assert_eq!(summands.len(), 1);
-                let product = summands[0];
-                let mut result = self.evaluate_rec(product.left_factor, eval_product, eval_leaf);
-                if let Some(factor) = product.right_factor {
-                    result.extend(self.evaluate_rec(factor, eval_product, eval_leaf));
-                }
-                if let Some(rule_id) = self.eval[product.action as usize] {
-                    vec![eval_product(rule_id as u32, &result[..])]
-                } else {
-                    result
-                }
-            }
-            &Node::Leaf { terminal, values } => {
-                vec![eval_leaf(terminal, values)]
-            }
-        }
-    }
-
     fn leaf(&mut self, terminal: Symbol, _x: usize, values: u32) -> NodeHandle {
         let handle = NodeHandle(self.graph.len());
         self.graph.push(Node::Leaf {
@@ -690,6 +729,58 @@ impl Forest {
     }
 }
 
+struct Evaluator<F, G> {
+    eval_product: F,
+    eval_leaf: G,
+}
+
+impl<T, F, G> Evaluator<F, G>
+    where F: Fn(u32, &[T]) -> T + Copy,
+          G: Fn(Symbol, u32) -> T + Copy,
+          T: Copy + ::std::fmt::Debug
+{
+    fn new(eval_product: F, eval_leaf: G) -> Self {
+        Self {
+            eval_product,
+            eval_leaf,
+        }
+    }
+
+    fn evaluate(&mut self, forest: &mut Forest, finished_node: NodeHandle) -> T
+        where F: Fn(u32, &[T]) -> T + Copy,
+              G: Fn(Symbol, u32) -> T + Copy,
+              T: Copy
+    {
+        self.evaluate_rec(forest, finished_node, 0)[0]
+    }
+
+    fn evaluate_rec(&mut self, forest: &mut Forest, handle: NodeHandle, depth: usize) -> Vec<T> {
+        match &forest.graph[handle.0] {
+            &Node::Sum { ref summands, .. } => {
+                assert_eq!(summands.len(), 1);
+                let product = summands[0];
+                let mut result = self.evaluate_rec(forest, product.left_factor, depth + 1);
+                for _ in 0 .. depth { print!("  "); } println!("left {:?}", result);
+                if let Some(factor) = product.right_factor {
+                    let v = self.evaluate_rec(forest, factor, depth + 1);
+                    for _ in 0 .. depth { print!("  "); } println!("right {:?}", v);
+                    result.extend(v);
+                }
+                if product.action != NULL_ACTION {
+                    // for _ in 0 .. depth { print!("  "); } println!("product {}", rule_id);
+                    vec![(self.eval_product)(product.action as u32, &result[..])]
+                } else {
+                    result
+                }
+            }
+            &Node::Leaf { terminal, values } => {
+                for _ in 0 .. depth { print!("  "); } println!("leaf {}", terminal.usize());
+                vec![(self.eval_leaf)(terminal, values)]
+            }
+        }
+    }
+}
+
 fn calc(expr: &str) -> f64 {
     let mut grammar = Grammar::new();
     let sum = grammar.make_symbol("sum");
@@ -712,19 +803,19 @@ fn calc(expr: &str) -> f64 {
     // expr ::= '(' sum ')' | '-' sum | number
     // number ::= whole | whole '.' whole
     // whole ::= whole [0-9] | [0-9]
-    grammar.rule(sum).rhs([sum, op_sum, factor]);
-    grammar.rule(sum).rhs([factor]);
-    grammar.rule(factor).rhs([factor, op_factor, expr_sym]);
-    grammar.rule(factor).rhs([expr_sym]);
-    grammar.rule(expr_sym).rhs([lparen, sum, rparen]);
-    grammar.rule(expr_sym).rhs([op_minus, sum]);
-    grammar.rule(expr_sym).rhs([number]);
-    grammar.rule(number).rhs([whole]);
-    grammar.rule(number).rhs([whole, dot, whole]);
-    grammar.rule(whole).rhs([whole, digit]);
-    grammar.rule(whole).rhs([digit]);
-    grammar.rule(op_sum).rhs([op_minus]);
-    grammar.rule(op_sum).rhs([op_plus]);
+    grammar.rule(sum).rhs([sum, op_sum, factor]).id(0).build();
+    grammar.rule(sum).rhs([factor]).id(1).build();
+    grammar.rule(factor).rhs([factor, op_factor, expr_sym]).id(2).build();
+    grammar.rule(factor).rhs([expr_sym]).id(3).build();
+    grammar.rule(expr_sym).rhs([lparen, sum, rparen]).id(4).build();
+    grammar.rule(expr_sym).rhs([op_minus, sum]).id(5).build();
+    grammar.rule(expr_sym).rhs([number]).id(6).build();
+    grammar.rule(number).rhs([whole]).id(7).build();
+    grammar.rule(number).rhs([whole, dot, whole]).id(8).build();
+    grammar.rule(whole).rhs([whole, digit]).id(9).build();
+    grammar.rule(whole).rhs([digit]).id(10).build();
+    grammar.rule(op_sum).rhs([op_minus]).id(11).build();
+    grammar.rule(op_sum).rhs([op_plus]).id(12).build();
     grammar.start_symbol(sum);
     let binarized_grammar = grammar.binarize();
     let mut recognizer = Recognizer::new(binarized_grammar);
@@ -740,43 +831,96 @@ fn calc(expr: &str) -> f64 {
             ' ' => continue,
             other => panic!("invalid character {}", other)
         };
-        println!("begin {} earleme", i);
+        println!("===== set {} =====", i);
         recognizer.log_last_earley_set();
         recognizer.begin_earleme();
         println!("scan '{}'", ch);
         recognizer.scan(terminal, ch as u32);
         println!("end {} earleme", i);
-        recognizer.log_last_earley_set();
+        recognizer.log_earley_set_diff();
         assert!(recognizer.end_earleme(), "parse failed at character {}", i);
     }
     let finished_node = recognizer.finished_node().expect("parse failed");
-    recognizer.forest.evaluate(
-        finished_node,
-        |rule_id, args| {
+    let mut evaluator = Evaluator::new(
+        |rule_id, args: &[(f64, u32)]| {
             match rule_id {
                 0 => {
-                    let (left, right) = (args[0], args[2]);
-                    left + right
+                    let (left, op, right) = (args[0].0, args[1].1, args[2].0);
+                    let op = op as u8 as char;
+                    if op == '-' {
+                        (left - right, 0)
+                    } else if op == '+' {
+                        (left + right, 0)
+                    } else {
+                        panic!()
+                    }
                 }
                 1 => {
-                    args[0]
+                    (args[0].0, 0)
+                }
+                2 => {
+                    let (left, op, right) = (args[0].0, args[1].1, args[2].0);
+                    if op as u8 as char == '*' {
+                        (left * right, 0)
+                    } else if op as u8 as char == '/' {
+                        (left / right, 0)
+                    } else {
+                        panic!()
+                    }
+                }
+                3 => {
+                    (args[0].0, 0)
+                }
+                4 => {
+                    (args[1].0, 0)
+                }
+                5 => {
+                    (-args[1].0, 0)
+                }
+                6 => {
+                    (args[0].0, 0)
+                }
+                7 => {
+                    (args[0].0, 0)
+                }
+                8 => {
+                    println!("{:?}", args);
+                    let (left, right, decimals) = (args[0].0, args[2].0, args[2].1 as i32);
+                    (left + right * 10f64.powi(-decimals), 0)
+                }
+                9 => {
+                    (args[0].0 * 10f64 + args[1].0, args[0].1 + 1)
+                }
+                10 => {
+                    (args[0].0, 1)
+                }
+                11 => {
+                    (0f64, '-' as u32)
+                }
+                12 => {
+                    (0f64, '+' as u32)
                 }
                 other => panic!("unknown rule id {}", other)
             }
         },
         |terminal, values| {
             if terminal == digit {
-                (values - ('0' as u32)) as f64
+                ((values - ('0' as u32)) as f64, 1)
+            } else if terminal == op_factor {
+                (0f64, values as u32)
             } else {
-                0f64
+                (0f64, 0)
             }
         }
-    )
+    );
+    evaluator.evaluate(&mut recognizer.forest, finished_node).0
+}
+
+fn test(expr: &str, expected: f64) {
+    let result = calc(expr);
+    assert_eq!(result, expected);
 }
 
 fn main() {
-    let expr = "((2.33 / (2.9+3.5)*4) - -6)";
-    let expected = 7.45625;
-    let result = calc(expr);
-    assert_eq!(result, expected);
+    test("((2.33 / (2.9+3.5)*4) - -6)", 7.45625);
 }

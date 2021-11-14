@@ -740,30 +740,26 @@ impl<T, F, G> Evaluator<F, G>
               G: Fn(Symbol, u32) -> T + Copy,
               T: Copy
     {
-        self.evaluate_rec(forest, finished_node, 0)[0]
+        self.evaluate_rec(forest, finished_node)[0]
     }
 
-    fn evaluate_rec(&mut self, forest: &mut Forest, handle: NodeHandle, depth: usize) -> Vec<T> {
+    fn evaluate_rec(&mut self, forest: &mut Forest, handle: NodeHandle) -> Vec<T> {
         match &forest.graph[handle.0] {
             &Node::Sum { ref summands, .. } => {
                 assert_eq!(summands.len(), 1);
                 let product = summands[0];
-                let mut result = self.evaluate_rec(forest, product.left_factor, depth + 1);
-                for _ in 0 .. depth { print!("  "); } println!("left {:?}", result);
+                let mut result = self.evaluate_rec(forest, product.left_factor);
                 if let Some(factor) = product.right_factor {
-                    let v = self.evaluate_rec(forest, factor, depth + 1);
-                    for _ in 0 .. depth { print!("  "); } println!("right {:?}", v);
+                    let v = self.evaluate_rec(forest, factor);
                     result.extend(v);
                 }
                 if product.action != NULL_ACTION {
-                    // for _ in 0 .. depth { print!("  "); } println!("product {}", rule_id);
                     vec![(self.eval_product)(product.action as u32, &result[..])]
                 } else {
                     result
                 }
             }
             &Node::Leaf { terminal, values } => {
-                for _ in 0 .. depth { print!("  "); } println!("leaf {}", terminal.usize());
                 vec![(self.eval_leaf)(terminal, values)]
             }
         }
@@ -868,7 +864,6 @@ fn calc(expr: &str) -> f64 {
                     (args[0].0, 0)
                 }
                 8 => {
-                    println!("{:?}", args);
                     let (left, right, decimals) = (args[0].0, args[2].0, args[2].1 as i32);
                     (left + right * 10f64.powi(-decimals), 0)
                 }

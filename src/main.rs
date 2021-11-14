@@ -77,7 +77,6 @@ struct Product {
 
 enum Node {
     Sum {
-        nonterminal: Symbol,
         summands: Vec<Product>,
     },
     Leaf {
@@ -300,16 +299,13 @@ impl<'a> RuleBuilder<'a> {
 // - for character in string { 
 // 1.   recognizer.begin_earleme();
 // 2.   recognizer.scan(token_to_symbol(character), values());
+//        2a. complete
 // 3.   recognizer.end_earleme();
 //        3a. self.complete_all_sums_entirely();
 //        3b. self.sort_medial_items();
 //        3c. self.prediction_pass();
 // - }
 //
-// 1. nothing is done
-// 2. completion of last-set that 
-// 3. 
-//    3a. 
 impl Recognizer {
     fn new(mut grammar: BinarizedGrammar) -> Self {
         grammar.sort_rules();
@@ -371,15 +367,10 @@ impl Recognizer {
         while let Some(&ei) = self.complete.peek() {
             let lhs_sym = self.tables.get_lhs(ei.dot);
             while let Some(&ei2) = self.complete.peek() {
-                // println!("complete sums {} ::= {} {:?} {}",
-                //     &self.tables.symbol_names[self.tables.get_lhs(ei2.dot).usize()],
-                //     &self.tables.symbol_names[self.tables.get_rhs0(ei2.dot).unwrap().usize()],
-                //     self.tables.get_rhs1(ei2.dot).map(|rhs1| &self.tables.symbol_names[rhs1.usize()]), ei2.origin);
                 if ei.origin == ei2.origin && lhs_sym == self.tables.get_lhs(ei2.dot) {
                     self.forest.push_summand(ei2);
                     self.complete.pop();
                 } else {
-                    // println!("complete");
                     break;
                 }
             }
@@ -467,7 +458,6 @@ impl Recognizer {
                 // No checks for uniqueness, because `medial` will be deduplicated.
                 // from A ::= • B
                 // to   A ::=   B •
-                println!("complete {} ::= {}", self.tables.symbol_names[trans.symbol.usize()], self.tables.symbol_names[symbol.usize()]);
                 self.complete.push(CompletedItem {
                     origin: earleme,
                     dot: trans.dot,
@@ -718,7 +708,6 @@ impl Forest {
     fn sum(&mut self, lhs_sym: Symbol, _origin: usize) -> NodeHandle {
         let handle = NodeHandle(self.graph.len());
         self.graph.push(Node::Sum {
-            nonterminal: lhs_sym,
             summands: mem::replace(&mut self.summands, vec![]),
         });
         handle
@@ -831,13 +820,8 @@ fn calc(expr: &str) -> f64 {
             ' ' => continue,
             other => panic!("invalid character {}", other)
         };
-        println!("===== set {} =====", i);
-        recognizer.log_last_earley_set();
         recognizer.begin_earleme();
-        println!("scan '{}'", ch);
         recognizer.scan(terminal, ch as u32);
-        println!("end {} earleme", i);
-        recognizer.log_earley_set_diff();
         assert!(recognizer.end_earleme(), "parse failed at character {}", i);
     }
     let finished_node = recognizer.finished_node().expect("parse failed");

@@ -1,5 +1,4 @@
-extern crate bit_vec;
-extern crate binary_heap_plus;
+extern crate bit_set;
 
 use std::convert::AsRef;
 use std::cmp;
@@ -7,8 +6,7 @@ use std::mem;
 use std::collections::{BTreeSet, BTreeMap};
 use std::iter;
 
-use bit_vec::BitVec;
-use binary_heap_plus::BinaryHeap;
+use bit_set::BitSet;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct Symbol(u32);
@@ -53,7 +51,7 @@ struct RuleBuilder<'a> {
 }
 
 struct Tables {
-    prediction_matrix: Vec<BitVec>,
+    prediction_matrix: Vec<BitSet>,
     start_symbol: Symbol,
     num_syms: usize,
     rules: Vec<BinarizedRule>,
@@ -68,6 +66,15 @@ struct PredictionTransition {
     dot: usize,
 }
 
+// Forest
+
+struct Forest {
+    graph: Vec<Node>,
+    // summands: u32,
+    summands: Vec<Product>,
+    eval: Vec<Option<usize>>,
+}
+
 #[derive(Copy, Clone)]
 struct Product {
     action: u32,
@@ -75,6 +82,7 @@ struct Product {
     right_factor: Option<NodeHandle>,
 }
 
+#[derive(Clone)]
 enum Node {
     Sum {
         summands: Vec<Product>,
@@ -85,12 +93,9 @@ enum Node {
     }
 }
 
-struct Forest {
-    graph: Vec<Node>,
-    // summands: u32,
-    summands: Vec<Product>,
-    eval: Vec<Option<usize>>,
-}
+const NULL_ACTION: u32 = !0;
+
+// Recognizer
 
 struct Recognizer {
     tables: Tables,
@@ -98,13 +103,16 @@ struct Recognizer {
     next_set: EarleySet,
     complete: BinaryHeap<CompletedItem>,
     forest: Forest,
-    // grammar: Grammar,
     finished_node: Option<NodeHandle>,
 }
 
 struct EarleySet {
-    predicted: BitVec,
+    predicted: BitSet,
     medial: Vec<Item>,
+}
+
+struct BinaryHeap<T> {
+    vec: Vec<T>,
 }
 
 struct Item {
@@ -176,7 +184,7 @@ impl SymbolSource {
 impl EarleySet {
     fn new(num_syms: usize) -> Self {
         EarleySet {
-            predicted: BitVec::from_elem(num_syms, false),
+            predicted: BitSet::with_capacity(num_syms),
             medial: vec![],
         }
     }
@@ -407,17 +415,17 @@ impl Recognizer {
             } else {
                 continue;
             };
-            if !destination[postdot.usize()] {
+            if !destination.contains(postdot.usize()) {
                 // Prediction happens here. We would prefer to call `self.predict`, but we can't,
                 // because `self.medial` is borrowed by `iter`.
                 let source = &self.tables.prediction_matrix[postdot.usize()];
-                destination.or(source);
+                destination.union_with(source);
             }
         }
     }
 
     fn complete(&mut self, earleme: usize, symbol: Symbol, node: NodeHandle) {
-        if self.earley_chart[earleme].predicted[symbol.usize()] {
+        if self.earley_chart[earleme].predicted.contains(symbol.usize()) {
             self.complete_medial_items(earleme, symbol, node);
             self.complete_unary_predictions(earleme, symbol, node);
             self.complete_binary_predictions(earleme, symbol, node);
@@ -454,7 +462,7 @@ impl Recognizer {
 
     fn complete_unary_predictions(&mut self, earleme: usize, symbol: Symbol, node: NodeHandle) {
         for trans in self.tables.unary_completions(symbol) {
-            if self.earley_chart[earleme].predicted.get(trans.symbol.usize()).unwrap_or(false) {
+            if self.earley_chart[earleme].predicted.contains(trans.symbol.usize()) {
                 // No checks for uniqueness, because `medial` will be deduplicated.
                 // from A ::= • B
                 // to   A ::=   B •
@@ -470,7 +478,7 @@ impl Recognizer {
 
     fn complete_binary_predictions(&mut self, earleme: usize, symbol: Symbol, node: NodeHandle) {
         for trans in self.tables.binary_completions(symbol) {
-            if self.earley_chart[earleme].predicted.get(trans.symbol.usize()).unwrap_or(false) {
+            if self.earley_chart[earleme].predicted.contains(trans.symbol.usize()) {
                 // No checks for uniqueness, because `medial` will be deduplicated.
                 // from A ::= • B   C
                 // to   A ::=   B • C
@@ -568,7 +576,7 @@ impl Recognizer {
     fn dots_for_log(&self, es: &EarleySet) -> BTreeMap<usize, BTreeMap<usize, BTreeSet<usize>>> {
         let mut dots = BTreeMap::new();
         for (i, rule) in self.tables.rules.iter().enumerate() {
-            if es.predicted[rule.lhs.usize()] {
+            if es.predicted.contains(rule.lhs.usize()) {
                 dots.entry(i).or_insert(BTreeMap::new()).entry(0).or_insert(BTreeSet::new()).insert(self.earleme());
             }
         }
@@ -576,6 +584,103 @@ impl Recognizer {
             dots.entry(item.dot).or_insert(BTreeMap::new()).entry(1).or_insert(BTreeSet::new()).insert(item.origin);
         }
         dots
+    }
+}
+
+impl<T> BinaryHeap<T>
+    where T: Ord + Copy,
+{
+    fn new() -> Self {
+        Self {
+            vec: vec![],
+        }
+    }
+
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            vec: Vec::with_capacity(capacity),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.vec.is_empty()
+    }
+
+    fn iter(&self) -> impl Iterator<Item=&T> {
+        self.vec.iter()
+    }
+
+    /// Returns the greatest item in the binary heap, or `None` if it is empty.
+    #[inline]
+    pub fn peek(&self) -> Option<&T> {
+        self.vec.get(0)
+    }
+
+    #[inline(always)]
+    fn get(&self, idx_idx: usize) -> Option<&T> {
+        self.vec.get(idx_idx)
+    }
+
+    /// Removes the greatest item from the binary heap and returns it, or `None` if it
+    /// is empty.
+    pub fn pop(&mut self) -> Option<T> {
+        self.vec.pop().map(move |mut item| {
+            if !self.vec.is_empty() {
+                mem::swap(&mut item, &mut self.vec[0]);
+                self.sift_down(0);
+            }
+            item
+        })
+    }
+
+    /// Pushes an item onto the binary heap.
+    pub fn push(&mut self, item: T) {
+        let old_indices_len = self.vec.len();
+        self.vec.push(item);
+        self.sift_up(0, old_indices_len);
+    }
+
+    /// Consumes the `BinaryHeap` and returns a vector in sorted
+    /// (ascending) order.
+    fn sift_up(&mut self, start: usize, mut pos: usize) {
+        let element_idx = self.vec[pos];
+        while pos > start {
+            let parent = (pos - 1) / 2;
+            let parent_idx = self.vec[parent];
+            if element_idx <= parent_idx {
+                break;
+            }
+            self.vec[pos] = parent_idx;
+            pos = parent;
+        }
+        self.vec[pos] = element_idx;
+    }
+
+    /// Take an element at `pos` and move it down the heap,
+    /// while its children are larger.
+    fn sift_down_range(&mut self, mut pos: usize, end: usize) {
+        let element_idx = self.vec[pos];
+        let mut child = 2 * pos + 1;
+        while child < end {
+            let right = child + 1;
+            // compare with the greater of the two children
+            if right < end && !(self.get(child).unwrap() > self.get(right).unwrap()) {
+                child = right;
+            }
+            // if we are already in order, stop.
+            if element_idx >= *self.get(child).unwrap() {
+                break;
+            }
+            self.vec[pos] = self.vec[child];
+            pos = child;
+            child = 2 * pos + 1;
+        }
+        self.vec[pos] = element_idx;
+    }
+
+    fn sift_down(&mut self, pos: usize) {
+        let len = self.vec.len();
+        self.sift_down_range(pos, len);
     }
 }
 
@@ -601,9 +706,9 @@ impl Tables {
     }
 
     fn populate_prediction_matrix(&mut self, grammar: &BinarizedGrammar) {
-        self.prediction_matrix.resize(self.num_syms, BitVec::from_elem(self.num_syms, false));
+        self.prediction_matrix.resize(self.num_syms, BitSet::with_capacity(self.num_syms));
         for rule in &grammar.rules {
-            self.prediction_matrix[rule.lhs.usize()].set(rule.rhs0.usize(), true);
+            self.prediction_matrix[rule.lhs.usize()].insert(rule.rhs0.usize());
         }
         self.reflexive_closure();
         self.transitive_closure();
@@ -611,7 +716,7 @@ impl Tables {
 
     fn reflexive_closure(&mut self) {
         for i in 0 .. self.num_syms {
-            self.prediction_matrix[i].set(i, true);
+            self.prediction_matrix[i].insert(i);
         }
     }
 
@@ -620,8 +725,8 @@ impl Tables {
             let (rows0, rows1) = self.prediction_matrix.split_at_mut(pos);
             let (rows1, rows2) = rows1.split_at_mut(1);
             for dst_row in rows0.iter_mut().chain(rows2.iter_mut()) {
-                if dst_row[pos] {
-                    dst_row.or(&rows1[0]);
+                if dst_row.contains(pos) {
+                    dst_row.union_with(&rows1[0]);
                 }
             }
         }
@@ -677,8 +782,6 @@ impl Tables {
     }
 }
 
-const NULL_ACTION: u32 = !0;
-
 impl Forest {
     fn new(grammar: &BinarizedGrammar) -> Self {
         Self {
@@ -705,7 +808,7 @@ impl Forest {
         });
     }
 
-    fn sum(&mut self, lhs_sym: Symbol, _origin: usize) -> NodeHandle {
+    fn sum(&mut self, _lhs_sym: Symbol, _origin: usize) -> NodeHandle {
         let handle = NodeHandle(self.graph.len());
         self.graph.push(Node::Sum {
             summands: mem::replace(&mut self.summands, vec![]),
@@ -726,7 +829,7 @@ struct Evaluator<F, G> {
 impl<T, F, G> Evaluator<F, G>
     where F: Fn(u32, &[T]) -> T + Copy,
           G: Fn(Symbol, u32) -> T + Copy,
-          T: Copy + ::std::fmt::Debug
+          T: Clone + ::std::fmt::Debug
 {
     fn new(eval_product: F, eval_leaf: G) -> Self {
         Self {
@@ -735,12 +838,8 @@ impl<T, F, G> Evaluator<F, G>
         }
     }
 
-    fn evaluate(&mut self, forest: &mut Forest, finished_node: NodeHandle) -> T
-        where F: Fn(u32, &[T]) -> T + Copy,
-              G: Fn(Symbol, u32) -> T + Copy,
-              T: Copy
-    {
-        self.evaluate_rec(forest, finished_node)[0]
+    fn evaluate(&mut self, forest: &mut Forest, finished_node: NodeHandle) -> T {
+        self.evaluate_rec(forest, finished_node)[0].clone()
     }
 
     fn evaluate_rec(&mut self, forest: &mut Forest, handle: NodeHandle) -> Vec<T> {
@@ -766,41 +865,61 @@ impl<T, F, G> Evaluator<F, G>
     }
 }
 
+#[derive(Clone, Debug)]
+enum Value {
+    Digits(String),
+    Float(f64),
+    None,
+}
+
 fn calc(expr: &str) -> f64 {
     let mut grammar = Grammar::new();
-    let sum = grammar.make_symbol("sum");
-    let op_sum = grammar.make_symbol("op_sum");
-    let factor = grammar.make_symbol("factor");
-    let op_factor = grammar.make_symbol("op_factor");
-    let lparen = grammar.make_symbol("lparen");
-    let rparen = grammar.make_symbol("rparen");
-    let expr_sym = grammar.make_symbol("expr_sym");
-    let op_minus = grammar.make_symbol("op_minus");
-    let op_plus = grammar.make_symbol("op_plus");
-    let number = grammar.make_symbol("number");
+    let statement = grammar.make_symbol("statement");
+    let mov = grammar.make_symbol("mov");
+    let inc = grammar.make_symbol("inc");
+    let dec = grammar.make_symbol("dec");
+    let jnz = grammar.make_symbol("jnz");
+    let whitespace = grammar.make_symbol("whitespace");
+    let value = grammar.make_symbol("value");
+    let letter = grammar.make_symbol("letter");
     let whole = grammar.make_symbol("whole");
+    let minus = grammar.make_symbol("minus");
     let digit = grammar.make_symbol("digit");
-    let dot = grammar.make_symbol("dot");
-    // sum ::= sum [+-] factor
-    // sum ::= factor
-    // factor ::= factor [*/] expr
-    // factor ::= expr
-    // expr ::= '(' sum ')' | '-' sum | number
-    // number ::= whole | whole '.' whole
-    // whole ::= whole [0-9] | [0-9]
-    grammar.rule(sum).rhs([sum, op_sum, factor]).id(0).build();
-    grammar.rule(sum).rhs([factor]).id(1).build();
-    grammar.rule(factor).rhs([factor, op_factor, expr_sym]).id(2).build();
-    grammar.rule(factor).rhs([expr_sym]).id(3).build();
-    grammar.rule(expr_sym).rhs([lparen, sum, rparen]).id(4).build();
-    grammar.rule(expr_sym).rhs([op_minus, sum]).id(5).build();
-    grammar.rule(expr_sym).rhs([number]).id(6).build();
-    grammar.rule(number).rhs([whole]).id(7).build();
-    grammar.rule(number).rhs([whole, dot, whole]).id(8).build();
-    grammar.rule(whole).rhs([whole, digit]).id(9).build();
-    grammar.rule(whole).rhs([digit]).id(10).build();
-    grammar.rule(op_sum).rhs([op_minus]).id(11).build();
-    grammar.rule(op_sum).rhs([op_plus]).id(12).build();
+    let m = grammar.make_symbol("m");
+    let o = grammar.make_symbol("o");
+    let v = grammar.make_symbol("v");
+    let i = grammar.make_symbol("i");
+    let n = grammar.make_symbol("n");
+    let c = grammar.make_symbol("c");
+    let d = grammar.make_symbol("d");
+    let e = grammar.make_symbol("e");
+    let j = grammar.make_symbol("j");
+    let n = grammar.make_symbol("n");
+    let z = grammar.make_symbol("z");
+    // statement ::= mov | inc | dec | jnz
+    // mov ::= m o v whitespace letter value
+    // inc ::= i n c whitespace letter
+    // dec ::= d e c whitespace letter
+    // jnz ::= j n z whitespace value value
+    // value ::= letter | number
+    // number ::= minus whole | whole
+    // whole ::= whole digit | digit
+    grammar.rule(statement).rhs([mov]).id(0).build();
+    grammar.rule(statement).rhs([inc]).id(0).build();
+    grammar.rule(statement).rhs([dec]).id(0).build();
+    grammar.rule(statement).rhs([jnz]).id(0).build();
+    grammar.rule(mov).rhs([m, o, v, whitespace, letter, value]).id(3).build();
+    grammar.rule(inc).rhs([i, n, c, whitespace, letter]).id(4).build();
+    grammar.rule(dec).rhs([d, e, c, whitespace, letter]).id(4).build();
+    grammar.rule(jnz).rhs([j, n, z, ]).id(4).build();
+    grammar.rule(factor).rhs([expr_sym]).id(5).build();
+    grammar.rule(expr_sym).rhs([lparen, sum, rparen]).id(6).build();
+    grammar.rule(expr_sym).rhs([op_minus, expr_sym]).id(7).build();
+    grammar.rule(expr_sym).rhs([number]).id(8).build();
+    grammar.rule(number).rhs([whole]).id(9).build();
+    grammar.rule(number).rhs([whole, dot, whole]).id(10).build();
+    grammar.rule(whole).rhs([whole, digit]).id(11).build();
+    grammar.rule(whole).rhs([digit]).id(12).build();
     grammar.start_symbol(sum);
     let binarized_grammar = grammar.binarize();
     let mut recognizer = Recognizer::new(binarized_grammar);
@@ -811,7 +930,8 @@ fn calc(expr: &str) -> f64 {
             '0' ..= '9' => digit,
             '(' => lparen,
             ')' => rparen,
-            '*' | '/' => op_factor,
+            '*' => op_mul,
+            '/' => op_div,
             '+' => op_plus,
             ' ' => continue,
             other => panic!("invalid character {}", other)
@@ -822,77 +942,73 @@ fn calc(expr: &str) -> f64 {
     }
     let finished_node = recognizer.finished_node().expect("parse failed");
     let mut evaluator = Evaluator::new(
-        |rule_id, args: &[(f64, u32)]| {
-            match rule_id {
-                0 => {
-                    let (left, op, right) = (args[0].0, args[1].1, args[2].0);
-                    let op = op as u8 as char;
-                    if op == '-' {
-                        (left - right, 0)
-                    } else if op == '+' {
-                        (left + right, 0)
-                    } else {
-                        panic!()
-                    }
+        |rule_id, args: &[Value]| {
+            match (
+                rule_id,
+                args.get(0).cloned().unwrap_or(Value::None),
+                args.get(1).cloned().unwrap_or(Value::None),
+                args.get(2).cloned().unwrap_or(Value::None),
+            ) {
+                (0, Value::Float(left), _, Value::Float(right)) => {
+                    Value::Float(left + right)
                 }
-                1 => {
-                    (args[0].0, 0)
+                (1, Value::Float(left), _, Value::Float(right)) => {
+                    Value::Float(left - right)
                 }
-                2 => {
-                    let (left, op, right) = (args[0].0, args[1].1, args[2].0);
-                    if op as u8 as char == '*' {
-                        (left * right, 0)
-                    } else if op as u8 as char == '/' {
-                        (left / right, 0)
-                    } else {
-                        panic!()
-                    }
+                (2, val, Value::None, Value::None) => {
+                    val
                 }
-                3 => {
-                    (args[0].0, 0)
+                (3, Value::Float(left), _, Value::Float(right)) => {
+                    Value::Float(left * right)
                 }
-                4 => {
-                    (args[1].0, 0)
+                (4, Value::Float(left), _, Value::Float(right)) => {
+                    Value::Float(left / right)
                 }
-                5 => {
-                    (-args[1].0, 0)
+                (5, val, Value::None, Value::None) => {
+                    val
                 }
-                6 => {
-                    (args[0].0, 0)
+                (6, _, val, _) => {
+                    val
                 }
-                7 => {
-                    (args[0].0, 0)
+                (7, _, Value::Float(num), Value::None) => {
+                    Value::Float(-num)
                 }
-                8 => {
-                    let (left, right, decimals) = (args[0].0, args[2].0, args[2].1 as i32);
-                    (left + right * 10f64.powi(-decimals), 0)
+                (8, Value::Digits(digits), Value::None, Value::None) => {
+                    Value::Float(digits.parse::<f64>().unwrap())
                 }
-                9 => {
-                    (args[0].0 * 10f64 + args[1].0, args[0].1 + 1)
+                (9, val @ Value::Digits(..), _, _) => {
+                    val
                 }
-                10 => {
-                    (args[0].0, 1)
+                (10, Value::Digits(before_dot), _, Value::Digits(after_dot)) => {
+                    let mut digits = before_dot;
+                    digits.push('.');
+                    digits.push_str(&after_dot[..]);
+                    Value::Digits(digits)
                 }
-                11 => {
-                    (0f64, '-' as u32)
+                (11, Value::Digits(mut num), Value::Digits(digit), _) => {
+                    num.push_str(&digit[..]);
+                    Value::Digits(num)
                 }
-                12 => {
-                    (0f64, '+' as u32)
+                (12, val @ Value::Digits(..), _, _) => {
+                    val
                 }
-                other => panic!("unknown rule id {}", other)
+                other => panic!("unknown rule id {:?} or args {:?}", rule_id, args)
             }
         },
         |terminal, values| {
             if terminal == digit {
-                ((values - ('0' as u32)) as f64, 1)
-            } else if terminal == op_factor {
-                (0f64, values as u32)
+                Value::Digits((values as u8 as char).to_string())
             } else {
-                (0f64, 0)
+                Value::None
             }
         }
     );
-    evaluator.evaluate(&mut recognizer.forest, finished_node).0
+    let result = evaluator.evaluate(&mut recognizer.forest, finished_node);
+    if let Value::Float(num) = result {
+        num
+    } else {
+        panic!("evaluation failed")
+    }
 }
 
 fn test(expr: &str, expected: f64) {
@@ -902,4 +1018,11 @@ fn test(expr: &str, expected: f64) {
 
 fn main() {
     test("((2.33 / (2.9+3.5)*4) - -6)", 7.45625);
+    test("12* 123/(-5 + 2)", -492.0);
+    test("1 - -(-(-(-4)))", -3.0);
+    test("2 /2+3 * 4.75- -6", 21.25);
+    test("2 / (2 + 3) * 4.33 - -6", 7.732);
+    test("(1 - 2) + -(-(-(-4)))", 3.0);
+    test("((2.33 / (2.9+3.5)*4) - -6)", 7.45625);
+    test("-0.46875", -0.46875);
 }

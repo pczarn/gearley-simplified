@@ -1,0 +1,16 @@
+name = calc
+
+sum ::= left:sum '+' right:factor => { left + right } | left:sum '-' right:factor => { left - right } | factor
+factor ::= factor '*' expr | factor '/' expr | expr
+expr ::= '(' sum ')' | '-' sum | number
+number ::= whole | whole '.' whole
+whole ::= whole '[0-9]' | '[0-9]'
+
+'(' -> lparen
+')' -> rparen
+'-' -> op_minus
+'+' -> op_plus
+'*' -> op_mul
+'/' -> op_div
+'[0-9]' -> digit
+'.' -> dot

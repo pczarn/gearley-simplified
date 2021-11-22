@@ -520,6 +520,23 @@ module Earley
         def initialize num_cols, num_rows
             super(num_rows) { BitVec.new num_cols }
         end
+
+        def transitive_closure!
+            n = [size, first.size].min
+            n.times do |pos|
+                rows = self[0 ... pos] + self[pos + 1 .. -1]
+                src_row = self[pos]
+                rows.each do |dst_row|
+                    dst_row.or src_row if dst_row[pos]
+                end
+            end
+        end
+
+        def reflexive_closure!
+            [size, first.size].min.times do |i|
+                self[i][i] = true
+            end
+        end
     end
 
     class MaybePostdot < Struct.new(:rhs1)
@@ -776,10 +793,11 @@ module Earley
             @start_symbol = grammar.start_symbol
             @num_syms = grammar.num_syms
             @rules = grammar.rules
-            populate_completions grammar
+            populate_completions! grammar
+            populate_prediction_matrix! grammar
         end
 
-        def populate_completions grammar
+        def populate_completions! grammar
             @binary_completions = Array.new(grammar.num_syms) { [] }
             @unary_completions = Array.new(grammar.num_syms) { [] }
             grammar.rules.each_with_index do |rule, i|
@@ -792,6 +810,14 @@ module Earley
                     @unary_completions[rule.rhs0.id] << transition
                 end
             end
+        end
+
+        def populate_prediction_matrix! grammar
+            grammar.rules.each do |rule|
+                @prediction_matrix[rule.lhs.id][rule.rhs0.id] = true
+            end
+            @prediction_matrix.reflexive_closure!
+            @prediction_matrix.transitive_closure!
         end
 
         def get_rhs0 dot
@@ -1030,5 +1056,3 @@ def calc expression
         raise "evaluation failed"
     end
 end
-
-p calc '12* 123/-(-5 + 2)'

@@ -4,14 +4,13 @@ use std::slice;
 
 use cfg::*;
 use cfg::history::*;
-use cfg::symbol::Symbol;
 use cfg::rule::builder::RuleBuilder;
 use cfg::sequence::builder::SequenceRuleBuilder;
 use cfg::sequence::Sequence;
 use cfg::usefulness::Usefulness;
 use cfg::cycles::Cycles;
 
-use recognizer::Dot;
+use item::Dot;
 
 /// Drop-in replacement for cfg::Cfg that traces relations between
 /// user-provided and internal grammars.

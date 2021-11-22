@@ -3,7 +3,7 @@ use std::rc::Rc;
 use std::collections::HashMap;
 
 use cfg::symbol::Symbol;
-use RuleId;
+use item::RuleId;
 
 pub struct Bocage {
     map: HashMap<SpannedNonterminal, Node>,

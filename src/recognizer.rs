@@ -1,83 +1,28 @@
 use std::collections::HashSet;
-use std::cmp::Ordering;
 use std::mem;
 
 use cfg::symbol::Symbol;
 
 use forest::{Bocage, Node};
 use grammar::InternalGrammar;
+use item::{Item, Dot, DotWithOrigin, SetId};
 
 pub struct Recognizer<'g> {
+    /// Reference to the grammar.
     grammar: &'g InternalGrammar,
+    /// The index of the last set that was fully populated with scanned items.
     earleme: usize,
+    /// The current set that is being constructed.
     current_set: Set,
+    /// Vector of sets that were constructed in the past.
     chart: Vec<Set>,
+    /// The parse forest.
     bocage: Bocage,
-    unique_dots: HashSet<(Dot, SetId)>,
+    /// Hash set that prevents adding duplicate items to the current set.
+    unique_dots: HashSet<DotWithOrigin>,
 }
-
-#[derive(Clone, Debug)]
-pub struct Item {
-    dot: Dot,
-    origin: SetId,
-    node: Option<Node>,
-}
-
-#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
-pub enum Dot {
-    Predicted {
-        id: RuleId,
-        postdot: Symbol,
-    },
-    Medial {
-        id: RuleId,
-        postdot: Symbol,
-    },
-    Completed {
-        id: RuleId,
-    },
-}
-
-impl Dot {
-    fn is_completed(&self) -> bool {
-        if let &Dot::Completed { .. } = self {
-            true
-        } else {
-            false
-        }
-    }
-
-    fn rule_id(&self) -> RuleId {
-        match *self {
-            Dot::Predicted { id, .. } | Dot::Medial { id, .. } | Dot::Completed { id, .. } => id,
-        }
-    }
-}
-
-pub type RuleId = u32;
-type SetId = usize;
 
 type Set = Vec<Item>;
-
-impl PartialEq for Item {
-    fn eq(&self, other: &Self) -> bool {
-        (self.dot, self.origin) == (other.dot, other.origin)
-    }
-}
-
-impl Eq for Item {}
-
-impl PartialOrd for Item {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some((self.origin, self.dot).cmp(&(other.origin, other.dot)))
-    }
-}
-
-impl Ord for Item {
-    fn cmp(&self, other: &Self) -> Ordering {
-        (self.origin, self.dot).cmp(&(other.origin, other.dot))
-    }
-}
 
 impl<'g> Recognizer<'g> {
     pub fn new(grammar: &'g InternalGrammar) -> Self {
@@ -136,6 +81,7 @@ impl<'g> Recognizer<'g> {
             // Exhaustion of the parse.
             return false;
         }
+        self.earleme += 1;
         // Completion pass.
         self.completion_pass();
         // Prediction pass.
@@ -144,7 +90,6 @@ impl<'g> Recognizer<'g> {
         // complete items in this set will never matter from now on.
         self.chart.last_mut().as_mut().unwrap().retain(|item| !item.dot.is_completed());
         self.next_set();
-        self.earleme += 1;
         true
     }
 

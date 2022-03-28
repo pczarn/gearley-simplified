@@ -1,0 +1,31 @@
+name = parse_response
+
+response ::=
+    m chars:any* => { ServerResponse::ReadMemory(chars) }
+    | l chars:any* => { ServerResponse::LastReadMemory(chars) }
+    | "PacketSize=" packesize:num ";qXfer:features:" features:feature{%;}* => { ServerResponse::Features { features } }
+    ;
+
+feature ::=
+    name:alnum* "+" => { Feature::Supported { name } }
+    | name:alnum* "-" => { Feature::Unsupported { name } }
+    | name:alnum* "?" => { Feature::MaybeSupported { name } }
+    | name:alnum* "=" value:alnum* => { Feature::Value { name, value } }
+    ;
+
+sum ::= left:sum '+' right:factor => { left + right } | left:sum '-' right:factor => { left - right } | factor
+factor ::= factor '*' expr | factor '/' expr | expr
+expr ::= '(' sum ')' | '-' sum | number
+number ::= whole | whole '.' whole
+whole ::= whole '[0-9]' | '[0-9]'
+
+'m' -> m
+'l' -> l
+any -> any
+alnum -> alnum
+'-' -> op_minus
+'+' -> op_plus
+'*' -> op_mul
+'/' -> op_div
+'[0-9]' -> digit
+'.' -> dot

@@ -1,0 +1,13 @@
+[package]
+name = "gearley-simplified"
+version = "0.1.1"
+edition = "2021"
+
+[lib]
+name = "gearley_simplified"
+
+[dependencies]
+bit-vec = "0.6"
+binary-heap-plus = "0.4"
+logos = "0.12"
+cfg = "0.4"

@@ -12,5 +12,7 @@ whole ::= whole '[0-9]' | '[0-9]'
 '+' -> op_plus
 '*' -> op_mul
 '/' -> op_div
-'[0-9]' -> digit
+'[0-9]' -> digit => { ((slice.chars().nth(0).unwrap() as u32 - ('0' as u32)) as f64, 1) }
 '.' -> dot
+default => { (0f64, 0u32) }
+error => { panic!("lexing error at {:?}", span); }

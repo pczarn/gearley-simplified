@@ -1,0 +1,38 @@
+name = bootstrap
+
+grammar ::= grammar rule | rule
+rule ::= nonterminal_rule | terminal_rule
+nonterminal_rule ::= ident '::=' rule_rhs
+terminal_rule ::= literal_token_rule | regexp_token_rule
+literal_token_rule -> Decl ::= quote string:string quote arrow ident:ident => { Decl::LiteralTokenDecl { string, ident } }
+regexp_token_rule -> Decl ::= slash string:string slash arrow ident:ident => { Decl::RegexpTokenDecl { regexp: string, ident } }
+string -> String ::= s:string ch:any => { s.push(ch); s } | ch:any => { ch.to_string() }
+ident -> String ::= ch:alpha s:alnum_str => { s.push(ch); s }
+alnum_str -> String ::= s:alnum_str ch:alnum => { s.push(ch); s } | ch:alnum => { ch.to_string() }
+
+'::=' -> op_bnf
+':' -> op_colon
+'(' -> lparen
+')' -> rparen
+'+' -> op_plus
+'*' -> op_star
+/[a-z][A-Z]/ -> alpha : char { slice.chars().next().unwrap() }
+/[0-9][a-z][A-Z]_/ -> alnum : char { slice.chars().next().unwrap() }
+'\'' -> quote
+'"' -> doublequote
+/./ -> any : char { slice.chars().next().unwrap() }
+'/' -> slash
+'->' -> arrow
+' ' -> ignore
+
+code(rust) begin
+#[derive(Clone)]
+enum Decl {
+    LiteralTokenDecl { string: String, ident: String },
+    RegexpTokenDecl { regexp: String, ident: String },
+}
+end
+
+example(name: simple) begin
+grammar ::= grammar rule | rule
+end

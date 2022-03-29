@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../cfg"
+		},
+		{
+			"path": "../gearley"
+		},
+		{
+			"path": "../bit-matrix"
+		}
+	],
+	"settings": {}
+}

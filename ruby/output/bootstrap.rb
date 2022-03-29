@@ -1,7 +1,7 @@
-require_relative "../earley"
-
-grammar = Earley::Grammar.new
-alnum,
+            require_relative "../earley"
+                        def make_grammar
+                grammar = Earley::Grammar.new
+                alnum,
     alnum_str,
     alpha,
     any,
@@ -24,7 +24,7 @@ alnum,
     slash,
     string,
     terminal_rule = grammar.make_n_symbols %w{
-    alnum
+                    alnum
     alnum_str
     alpha
     any
@@ -47,8 +47,8 @@ alnum,
     slash
     string
     terminal_rule
-}
-grammar.rule lhs: #<struct Sym name="grammar", bind=nil>, rhs: [#<struct Sym name="grammar", bind=nil>, #<struct Sym name="rule", bind=nil>], id: 0
+                }
+                grammar.rule lhs: #<struct Sym name="grammar", bind=nil>, rhs: [#<struct Sym name="grammar", bind=nil>, #<struct Sym name="rule", bind=nil>], id: 0
 grammar.rule lhs: #<struct Sym name="grammar", bind=nil>, rhs: [#<struct Sym name="rule", bind=nil>], id: 1
 grammar.rule lhs: #<struct Sym name="rule", bind=nil>, rhs: [#<struct Sym name="nonterminal_rule", bind=nil>], id: 2
 grammar.rule lhs: #<struct Sym name="rule", bind=nil>, rhs: [#<struct Sym name="terminal_rule", bind=nil>], id: 3
@@ -64,5 +64,9 @@ grammar.rule lhs: #<struct Sym name="alnum_str", bind=nil>, rhs: [#<struct Sym n
 grammar.rule lhs: #<struct Sym name="alnum_str", bind=nil>, rhs: [#<struct Sym name="alnum", bind="ch">], id: 13
 grammar.rule lhs: #<struct Sym name="grammar", bind=nil>, rhs: [#<struct Sym name="grammar", bind=nil>, #<struct Sym name="rule", bind=nil>], id: 14
 grammar.rule lhs: #<struct Sym name="grammar", bind=nil>, rhs: [#<struct Sym name="rule", bind=nil>], id: 15
-grammar.start_symbol = #<struct Sym name="grammar", bind=nil>
-p grammar
+                grammar.start_symbol = grammar
+                grammar
+            end
+
+            grammar = make_grammar
+            p grammar

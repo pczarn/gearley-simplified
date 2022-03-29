@@ -1,7 +1,7 @@
-require_relative "../earley"
-
-grammar = Earley::Grammar.new
-digit,
+            require_relative "../earley"
+                        def make_grammar
+                grammar = Earley::Grammar.new
+                digit,
     dot,
     expr,
     factor,
@@ -14,7 +14,7 @@ digit,
     rparen,
     sum,
     whole = grammar.make_n_symbols %w{
-    digit
+                    digit
     dot
     expr
     factor
@@ -27,8 +27,8 @@ digit,
     rparen
     sum
     whole
-}
-grammar.rule lhs: #<struct Sym name="sum", bind=nil>, rhs: [#<struct Sym name="sum", bind="left">, #<struct Sym name="op_plus", bind=nil>, #<struct Sym name="factor", bind="right">], id: 0
+                }
+                grammar.rule lhs: #<struct Sym name="sum", bind=nil>, rhs: [#<struct Sym name="sum", bind="left">, #<struct Sym name="op_plus", bind=nil>, #<struct Sym name="factor", bind="right">], id: 0
 grammar.rule lhs: #<struct Sym name="sum", bind=nil>, rhs: [#<struct Sym name="sum", bind="left">, #<struct Sym name="op_minus", bind=nil>, #<struct Sym name="factor", bind="right">], id: 1
 grammar.rule lhs: #<struct Sym name="sum", bind=nil>, rhs: [#<struct Sym name="factor", bind=nil>], id: 2
 grammar.rule lhs: #<struct Sym name="factor", bind=nil>, rhs: [#<struct Sym name="factor", bind=nil>, #<struct Sym name="op_mul", bind=nil>, #<struct Sym name="expr", bind=nil>], id: 3
@@ -41,5 +41,9 @@ grammar.rule lhs: #<struct Sym name="number", bind=nil>, rhs: [#<struct Sym name
 grammar.rule lhs: #<struct Sym name="number", bind=nil>, rhs: [#<struct Sym name="whole", bind=nil>, #<struct Sym name="dot", bind=nil>, #<struct Sym name="whole", bind=nil>], id: 10
 grammar.rule lhs: #<struct Sym name="whole", bind=nil>, rhs: [#<struct Sym name="whole", bind=nil>, #<struct Sym name="digit", bind=nil>], id: 11
 grammar.rule lhs: #<struct Sym name="whole", bind=nil>, rhs: [#<struct Sym name="digit", bind=nil>], id: 12
-grammar.start_symbol = #<struct Sym name="sum", bind=nil>
-p grammar
+                grammar.start_symbol = sum
+                grammar
+            end
+
+            grammar = make_grammar
+            p grammar

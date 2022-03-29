@@ -1,0 +1,37 @@
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    // for the documentation about the tasks.json format
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "translate-grammar",
+            "type": "shell",
+            "command": "ruby ruby/translate-grammar.rb",
+            "problemMatcher": {
+                "owner": "ruby",
+                "fileLocation": ["relative", "${workspaceRoot}"],
+                "severity": "error",
+                "pattern": [
+                  // {
+                  //   "regexp": "^\\s+from (.*):(\\d+):(in.*)$",
+                  //   "file": 1,
+                  //   "line": 2,
+                  //   "message": 3
+                  // },
+                  {
+                    "regexp": "^(.*):(\\d+):(in.*:.*)$",
+                    "file": 1,
+                    "line": 2,
+                    "message": 3
+                  }
+              ]
+            }
+            // translate-grammar.rb:165:in `start_sym_name': wrong number of arguments (given 1, expected 0) (ArgumentError)
+            // from translate-grammar.rb:193:in `generate_grammar'
+            // from translate-grammar.rb:412:in `generate'
+            // from translate-grammar.rb:766:in `block in <main>'
+            // from translate-grammar.rb:761:in `each'
+            // from translate-grammar.rb:761:in `<main>'
+        }
+    ]
+}

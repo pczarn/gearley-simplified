@@ -4,7 +4,7 @@ extern crate binary_heap_plus;
 use std::convert::AsRef;
 use std::cmp;
 use std::mem;
-use std::collections::{BTreeSet, BTreeMap};
+use std::collections::{BTreeSet, BTreeMap, HashMap};
 use std::iter;
 
 use bit_vec::BitVec;
@@ -43,6 +43,7 @@ struct BinarizedRule {
 struct SymbolSource {
     next_symbol: Symbol,
     symbol_names: Vec<String>,
+    symbol_table: HashMap<String, Symbol>,
 }
 
 pub struct RuleBuilder<'a> {
@@ -164,18 +165,23 @@ impl Symbol {
 
 impl SymbolSource {
     fn new() -> Self {
-        Self { next_symbol: Symbol(0), symbol_names: vec![] }
+        Self { next_symbol: Symbol(0), symbol_names: vec![], symbol_table: HashMap::new() }
     }
 
     fn make_symbol(&mut self, name: &str) -> Symbol {
         let result = self.next_symbol;
         self.next_symbol.0 += 1;
         self.symbol_names.push(name.to_owned());
+        self.symbol_table.insert(name.to_owned(), result);
         result
     }
 
     fn make_n_symbols<F>(&mut self, count: usize, mut f: F) -> Vec<Symbol> where F: FnMut() -> String {
         (0..count).map(|_| self.make_symbol(&f()[..])).collect()
+    }
+
+    fn sym(&self, name: &str) -> Option<Symbol> {
+        self.symbol_table.get(name).cloned()
     }
 }
 
@@ -207,6 +213,10 @@ impl Grammar {
 
     pub fn start_symbol(&mut self, symbol: Symbol) {
         self.start_symbol = Some(symbol);
+    }
+
+    pub fn sym(&self, name: &str) -> Option<Symbol> {
+        self.symbol_source.sym(name)
     }
 
     pub fn binarize(&self) -> BinarizedGrammar {
@@ -259,17 +269,23 @@ impl Grammar {
             }
             rules.into_iter()
         }).collect();
-        BinarizedGrammar {
+        let mut result = BinarizedGrammar {
             rules: binarized_rules,
             symbol_source,
             start_symbol: self.start_symbol,
-        }
+        };
+        result.sort_rules();
+        result
     }
 }
 
 impl BinarizedGrammar {
     fn sort_rules(&mut self) {
         self.rules.sort_by(|a, b| a.lhs.cmp(&b.lhs));
+    }
+
+    pub fn sym(&self, name: &str) -> Option<Symbol> {
+        self.symbol_source.sym(name)
     }
 }
 
@@ -313,13 +329,12 @@ impl<'a> RuleBuilder<'a> {
 // - }
 //
 impl Recognizer {
-    pub fn new(mut grammar: BinarizedGrammar) -> Self {
-        grammar.sort_rules();
+    pub fn new(grammar: &BinarizedGrammar) -> Self {
         let mut result = Self {
-            tables: Tables::new(&grammar),
+            tables: Tables::new(grammar),
             earley_chart: vec![],
             next_set: EarleySet::new(grammar.symbol_source.next_symbol.usize()),
-            forest: Forest::new(&grammar),
+            forest: Forest::new(grammar),
             // complete: BinaryHeap::new_by_key(Box::new(|completed_item| (completed_item.origin, completed_item.dot))),
             complete: BinaryHeap::with_capacity(64),
             finished_node: None,

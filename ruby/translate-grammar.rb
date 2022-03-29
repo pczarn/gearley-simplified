@@ -306,11 +306,15 @@ class RsGenerator
     end
 
     def rs_auto_code rule
-        action_fields = bound_syms(rule).map do |sym|
-            "#{sym.bind},"
-        end.join(" ")
-    
-        "#{rule_type(rule)} { #{action_fields} }"
+        if grammar_types[rule.lhs.name] == "()"
+            "()"
+        else
+            action_fields = bound_syms(rule).map do |sym|
+                "#{sym.bind},"
+            end.join(" ")
+        
+            "#{rule_type(rule)} { #{action_fields} }"
+        end
     end
     
     def rule_type rule
@@ -325,10 +329,10 @@ class RsGenerator
 
     def auto_decls
         rules.each.filter do |rule|
-            rule.action.nil?
+            rule.action.nil? && !bound_syms(rule).empty?
         end.map do |rule|
             "#[derive(Clone)] pub struct #{rule_type(rule)} { #{auto_rule_fields(rule)} }"
-        end
+        end.uniq.join("\n")
     end
 
     def error_attrs
@@ -424,7 +428,7 @@ class RsGenerator
 
             #[allow(unused_braces)]
             pub fn parse(expr: &str) -> #{result_type} {
-                let grammar = make_grammar();
+                let grammar = make_parser_grammar();
                 let mut recognizer = Recognizer::new(&grammar);
                 #[derive(Logos)]
                 enum Token {
@@ -527,241 +531,6 @@ class RbGenerator < RsGenerator
             p grammar
         RUBY
     end
-end
-
-def rs_grammar grammar_str
-    grammar = get_rules(grammar_str)
-    all_syms = get_syms(grammar)
-    start_sym_name = all_syms.first.name
-    all_syms_dedup = all_syms.map(&:name).sort.uniq
-
-    # sym_name_assign = all_syms_dedup.join(",\n    ")
-    # sym_name_arg = all_syms_dedup.join("\n    ")
-
-    symbol_stmts = all_syms_dedup.map do |sym_name|
-        %{let sym_#{sym_name} = grammar.make_symbol("#{sym_name}");}
-    end.join("\n")
-
-    rule_stmts = grammar.rules.each_with_index.map do |rule, i|
-        rhs = rule.rhs.map {|sym| "sym_#{sym.name}" }.join(", ")
-        "grammar.rule(sym_#{rule.lhs.name}).rhs([#{rhs}]).id(#{i}).build();"
-    end.join("\n")
-
-    grammar_content = GrammarContent.new(symbol_stmts, rule_stmts, start_sym_name)
-
-    grammar_types = {}
-
-    rust_code = get_code(grammar_str, "rust")
-
-    rule_actions = grammar.rules.each_with_index.map do |rule, i|
-        # ACTION_REGEXP = /
-        #     \|(?<args>[\w\s,]+)\|
-        #     (?<code>.*)
-        # /x
-        # block = rule.action.match(ACTION_REGEXP)
-        # match_args = ""
-        # if block
-        #     match_args = block[:args].split(',').map(&:strip).each_with_index.map do |i, arg|
-        #         "let #{arg} = args[#{i}];"
-        #     end.join("\n")
-        #     action_code = block[:code]
-        # end
-        match_args = rule.rhs.each_with_index.map do |sym, i|
-            if sym_bind = sym.bind
-                ["let mut #{sym_bind} = match args[#{i}].clone() { Value::#{sym.name}(val) => val, _ => panic!(\"wrong sym\") };"]
-            else
-                []
-            end
-        end.flatten(1).join("\n")
-
-        action_code = rule.action || rs_auto_code(rule, rust_code)
-
-        result_variant = rule.lhs.name
-
-        "#{i} => {
-            #{match_args}
-            Value::#{result_variant}({ #{action_code} })
-        }"
-    end.join("\n")
-
-    rust_code = rust_code.uniq.join("\n")
-
-    error_attrs = rs_lexer_attrs(grammar.lexer.error, :error)
-    ignore_attrs = rs_lexer_attrs(grammar.lexer.ignore, :ignore)
-    lexer_variants = grammar.lexer.terminals.map do |ident, tokens|
-        rs_lexer_attrs(tokens) + "\n" +
-        "#{ident.camel_case}(usize),"
-    end.join("\n")
-
-    grammar.lexer.terminals.each do |ident, tokens|
-        types = tokens.map(&:type).uniq
-        raise "conflicting types for #{ident}" if types.size > 1
-        type = types.first
-        if type.nil?
-            type = "()"
-        end
-        grammar_types[ident] = type
-    end
-
-    grammar.rules.group_by(&:lhs).each do |lhs, rules|
-        types = rules.map(&:type).compact.uniq
-        raise "conflicting types #{types}" if types.size > 1
-        type = types.first || "()"
-        grammar_types[lhs.name] = type
-    end
-
-    rule_value_variants = grammar.rules.group_by(&:lhs).map do |lhs, rules|
-        "#{lhs.name}(RsTy#{lhs.name.camel_case}),"
-    end.join("\n")
-
-    rs_types = grammar_types.map do |ident, type|
-        name = ident.camel_case
-        if type == "RsTy#{name}"
-            ""
-        else
-            "type RsTy#{name} = #{type};"
-        end
-    end.join("\n")
-
-    terminal_value_variants = grammar.lexer.terminals.map do |ident, tokens|
-        "#{ident}(RsTy#{ident.camel_case}),"
-    end.join("\n")
-
-    terminal_actions = grammar.lexer.terminals.map do |ident, tokens|
-        positive_cases = tokens.each_with_index.map do |token, ordinal|
-            "if ordinal == #{ordinal} { #{token.code} }"
-        end
-        negative_case = "{ unreachable!() }"
-        cases = positive_cases + [negative_case]
-        code = cases.join(" else ")
-        "if terminal == grammar.sym(\"#{ident}\").unwrap() { Value::#{ident}(#{code}) }"
-    end.join(" else ")
-
-    # Token::OpMinus => op_minus,
-    # Token::Dot => dot,
-    # Token::Digit => digit,
-    # Token::Lparen => lparen,
-    # Token::Rparen => rparen,
-    # Token::OpFactor => op_factor,
-    # Token::OpPlus => op_plus,
-
-    map_token_to_terminal = grammar.lexer.terminals.map do |ident, tokens|
-        "Token::#{ident.camel_case}(ordinal) => (grammar.sym(\"#{ident}\").unwrap(), ordinal),"
-    end.join("\n")
-
-    result_type = grammar_types[grammar.rules.first.lhs.name]
-    result_variant = grammar.rules.first.lhs.name
-
-    examples = get_examples(grammar_str)
-
-    test_fns = examples.map do |example|
-        <<-RUST
-        #[test]
-        fn test_example_#{example.name}() {
-            parse(r###"#{example.string}"###);
-        }
-        RUST
-    end.join("\n")
-
-    # lexer_str_stmts = grammar.terminals.map do |str, ident|
-    #     "lexer.add(\"#{str}\", op_minus);"
-    # end.join("\n")
-
-    # lexer_regexp_stmts = grammar.regexp_terminals.map do |regexp_str, ident|
-    #     "lexer.add_regexp(Regexp::new(\"#{regexp_str}\"), #{ident});"
-    # end.join("\n")
-
-    # lexer_ignore_stmt = grammar.ignore_regexp.nil ? "" : "lexer.ignore(Regexp::new(\"#{grammar.ignore_regexp}\"));"
-
-    <<-RUST
-        extern crate logos;
-        extern crate gearley_simplified;
-
-        use gearley_simplified::{Grammar, BinarizedGrammar, Evaluator, Forest, Recognizer};
-
-        use logos::Logos;
-
-        #{rust_code}
-        #{rs_types}
-
-        fn make_grammar() -> BinarizedGrammar {
-            let mut grammar = Grammar::new();
-            #{symbol_stmts}
-            #{rule_stmts}
-            grammar.start_symbol(sym_#{start_sym_name});
-            grammar.binarize()
-        }
-
-        #[allow(unused_braces)]
-        pub fn parse(expr: &str) -> #{result_type} {
-            let grammar = make_grammar();
-            let mut recognizer = Recognizer::new(&grammar);
-            #[derive(Logos)]
-            enum Token {
-                #{lexer_variants}
-                #{ignore_attrs}
-                #{error_attrs}
-                #[error]
-                Error,
-            }
-            #[derive(Clone)]
-            #[allow(non_camel_case_types)]
-            enum Value {
-                None,
-                #{rule_value_variants}
-                #{terminal_value_variants}
-            }
-            let mut lex = Token::lexer(expr);
-            let mut spans = vec![];
-            let mut ordinals = vec![];
-            while let Some(token) = lex.next() {
-                spans.push(lex.span());
-                recognizer.begin_earleme();
-                let (terminal, ordinal) = match token {
-                    #{map_token_to_terminal}
-                    Token::Error => {
-                        let span = lex.span();
-                        panic!("lexing error at {:?}", span);
-                    },
-                };
-                ordinals.push(ordinal);
-                recognizer.scan(terminal, spans.len() as u32 - 1);
-                if !recognizer.end_earleme() {
-                    eprintln!("actual: {}", recognizer.terminal_name(terminal));
-                    recognizer.log_last_earley_set();
-                    panic!(
-                        "parse failed at string {} at input range {:?}",
-                        lex.slice(),
-                        lex.span()
-                    );
-                }
-            }
-            let finished_node = recognizer.finished_node().expect("parse failed");
-            let rule_eval = |rule_id, args: &[Value]| {
-                match rule_id {
-                    #{rule_actions}
-                    other => panic!("unknown rule id {}", other)
-                }
-            };
-            let terminal_eval = |terminal, values| {
-                let span = spans[values as usize].clone();
-                let ordinal = ordinals[values as usize];
-                let slice = expr[span].to_string();
-                #{terminal_actions}
-                else {
-                    Value::None
-                }
-            };
-            let mut evaluator = Evaluator::new(rule_eval, terminal_eval);
-            let result = evaluator.evaluate(recognizer.forest_mut(), finished_node);
-            match result {
-                Value::#{result_variant}(val) => val,
-                _ => panic!("incorrect result of eval")
-            }
-        }
-
-        #{test_fns}
-    RUST
 end
 
 def cargo_toml filebase

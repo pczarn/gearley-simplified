@@ -31,10 +31,18 @@ module Earley
 
     class Leaf < Struct.new(:terminal, :values, :alive)
         def initialize(terminal, values, alive = false); super; end
+
+        def transparent?
+            false
+        end
     end
 
     class Sum < Struct.new(:summands, :alive)
         def initialize(summands, alive = false); super; end
+
+        def transparent?
+            summands.all {|summand| summand.action.nil? }
+        end
     end
 
     class Product < Struct.new(:action, :left_node, :right_node)
@@ -428,47 +436,52 @@ module Earley
         end
 
         def evaluate forest, finished_node
-            stack = [finished_node]
-            while node_handle = stack.pop
-                node = forest.graph[node_handle.index]
+            each_reachable_from(finished_node) do |node|
                 node.alive = true
-                case node
-                when Sum then
-                    node.summands.each do |product|
-                        stack << product.left_node
-                        stack << product.right_node if product.right_node
-                    end
-                when Leaf then
-                end
             end
-
+            
             forest.graph.each_with_index do |node, i|
-                if node.alive
-                    case node
-                    when Leaf
-                        result = @eval_leaf.call(node.terminal, node.values)
-                        forest.graph[i] = Evaluated.new([result])
-                    when Sum
-                        raise "found #{node.summands.size} summands, expected 1" if node.summands.size != 1
-
-                        values = node.summands.flat_map do |product|
-                            if product.action
-                                unfold_factors forest.graph, product
-                                cartesian_product = @factors[0].product(*@factors[1..-1])
-                                cartesian_product.map do |value_ary|
-                                    @eval_product.call(product.action, value_ary)
-                                end
-                            else
-                                []
-                            end
-                        end
-                        next if values.empty?
-                        forest.graph[i] = Evaluated.new(values)
-                    end
+                if node.alive && !node.transparent?
+                    forest.graph[i] = Evaluated.new(evaluate_node(forest, node))
                 end
             end
 
             forest.graph[finished_node.index].values
+        end
+
+        def each_reachable_from node
+            stack = [node]
+            while node = stack.pop
+                yield node
+                if node.kind_of?(Sum)
+                    node.summands.each do |summand|
+                        stack << summand.right_node if summand.right_node
+                        stack << summand.left_node
+                    end
+                end
+            end
+        end
+
+        def evaluate_node forest, node
+            case node
+            when Leaf
+                [@eval_leaf.call(node.terminal, node.values)]
+            when Sum
+                raise "found #{node.summands.size} summands, expected 1" if node.summands.size != 1
+
+                values = node.summands.flat_map do |product|
+                    if product.action
+                        unfold_factors forest.graph, product
+                        cartesian_product = @factors[0].product(*@factors[1..-1])
+                        cartesian_product.map do |value_ary|
+                            @eval_product.call(product.action, value_ary)
+                        end
+                    else
+                        []
+                    end
+                end
+                values.empty? ? nil : values
+            end
         end
 
         def unfold_factors graph, product
@@ -478,7 +491,7 @@ module Earley
             while factor = @factor_traversal.pop
                 case factor
                 when Sum
-                    raise "found #{factor.summands.size} summands, expected 1" if factor.summands.size != 1
+                    raise "found #{factor.summands.size} summands at this level, expected 1" if factor.summands.size != 1
                     product = factor.summands.first
                     enqueue_for_unfold graph, product.left_node, product.right_node
                 when Evaluated

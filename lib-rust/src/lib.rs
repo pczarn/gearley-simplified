@@ -1,7 +1,7 @@
 extern crate bit_vec;
 extern crate binary_heap_plus;
 
-use std::convert::AsRef;
+use std::convert::{self, AsRef};
 use std::cmp;
 use std::mem;
 use std::collections::{BTreeSet, BTreeMap, HashMap};
@@ -93,7 +93,10 @@ enum Node {
     Leaf {
         terminal: Symbol,
         values: u32,
-    }
+    },
+    Evaluated {
+        values: u32,
+    },
 }
 
 const NULL_ACTION: u32 = !0;
@@ -163,6 +166,12 @@ impl Symbol {
     }
 }
 
+impl convert::From<usize> for Symbol {
+    fn from(i: usize) -> Self {
+        Symbol(i as u32)
+    }
+}
+
 impl SymbolSource {
     fn new() -> Self {
         Self { next_symbol: Symbol(0), symbol_names: vec![], symbol_table: HashMap::new() }
@@ -217,6 +226,10 @@ impl Grammar {
 
     pub fn sym(&self, name: &str) -> Option<Symbol> {
         self.symbol_source.sym(name)
+    }
+
+    pub fn sym_name(&self, sym: Symbol) -> Option<&str> {
+        self.symbol_source.symbol_names.get(sym.usize()).map(|s| &s[..])
     }
 
     pub fn binarize(&self) -> BinarizedGrammar {
@@ -606,6 +619,10 @@ impl Recognizer {
     pub fn forest_mut(&mut self) -> &mut Forest {
         &mut self.forest
     }
+
+    pub fn predicted<'a>(&'a self) -> impl Iterator<Item=Symbol> + 'a {
+        self.earley_chart.last().expect("uninitialized earley chart").predicted.iter().enumerate().filter_map(|(i, b)| if b { Some(i.into()) } else { None })
+    }
 }
 
 impl Tables {
@@ -751,8 +768,8 @@ pub struct Evaluator<F, G> {
 }
 
 impl<T, F, G> Evaluator<F, G>
-    where F: Fn(u32, &[T]) -> T + Copy,
-          G: Fn(Symbol, u32) -> T + Copy
+    where F: Fn(u32, &[&T]) -> T + Copy,
+          G: Fn(Symbol, u32) -> Vec<T> + Copy
 {
     pub fn new(eval_product: F, eval_leaf: G) -> Self {
         Self {
@@ -761,35 +778,112 @@ impl<T, F, G> Evaluator<F, G>
         }
     }
 
-    pub fn evaluate(&mut self, forest: &mut Forest, finished_node: NodeHandle) -> T
-        where F: Fn(u32, &[T]) -> T,
-              G: Fn(Symbol, u32) -> T,
+    pub fn evaluate(&mut self, forest: &mut Forest, finished_node: NodeHandle) -> Vec<T>
+        where F: Fn(u32, &[&T]) -> T,
+              G: Fn(Symbol, u32) -> Vec<T>,
     {
-        let res = self.evaluate_rec(forest, finished_node);
-        res.into_iter().next().expect("incorrect eval count")
-    }
-
-    fn evaluate_rec(&mut self, forest: &mut Forest, handle: NodeHandle) -> Vec<T> {
-        match &forest.graph[handle.0] {
-            &Node::Sum { ref summands, .. } => {
+        use itertools::Itertools;
+        fn transparent_sum(summands: &[Product]) -> bool {
+            assert_ne!(summands.len(), 0);
+            if summands.iter().all(|summand| summand.action == NULL_ACTION) {
                 assert_eq!(summands.len(), 1);
-                let product = summands[0];
-                let mut result = self.evaluate_rec(forest, product.left_factor);
-                if let Some(factor) = product.right_factor {
-                    let v = self.evaluate_rec(forest, factor);
-                    result.extend(v);
-                }
-                if product.action != NULL_ACTION {
-                    vec![(self.eval_product)(product.action as u32, &result[..])]
-                } else {
-                    result
-                }
-            }
-            &Node::Leaf { terminal, values } => {
-                vec![(self.eval_leaf)(terminal, values)]
+                true
+            } else {
+                false
             }
         }
+        let mut liveness = BitVec::from_elem(forest.graph.len(), false);
+        let mut stack = vec![finished_node];
+        while let Some(node) = stack.pop() {
+            liveness.set(node.0, true);
+            match &forest.graph[node.0] {
+                &Node::Sum { ref summands } => {
+                    for &summand in summands {
+                        if let Some(node) = summand.right_factor {
+                            stack.push(node);
+                        }
+                        stack.push(summand.left_factor);
+                    }
+                }
+                &Node::Leaf { .. } | &Node::Evaluated { .. } => {}
+            }
+        }
+        let mut results: Vec<Vec<T>> = vec![];
+        for (i, alive) in liveness.iter().enumerate() {
+            if !alive {
+                continue;
+            }
+            let node_results = match &forest.graph[i] {
+                &Node::Leaf { terminal, values } => {
+                    (self.eval_leaf)(terminal, values)
+                }
+                &Node::Sum { ref summands } => {
+                    if transparent_sum(summands) {
+                        continue;
+                    }
+                    let mut sum_results = vec![];
+                    for &summand in summands {
+                        let mut factors = vec![];
+                        let mut factor_stack = vec![];
+                        if let Some(node) = summand.right_factor {
+                            factor_stack.push(node);
+                        }
+                        factor_stack.push(summand.left_factor);
+                        while let Some(factor) = factor_stack.pop() {
+                            match &forest.graph[factor.0] {
+                                &Node::Sum { ref summands } => {
+                                    let summand = &summands[0];
+                                    if let Some(node) = summand.right_factor {
+                                        factor_stack.push(node);
+                                    }
+                                    factor_stack.push(summand.left_factor);
+                                }
+                                &Node::Evaluated { values } => {
+                                    factors.push(values);
+                                }
+                                &Node::Leaf { .. } => unreachable!()
+                            }
+                        }
+                        sum_results.extend(factors.iter().map(|&values| results[values as usize][..].iter()).multi_cartesian_product().map(|product| (self.eval_product)(summand.action, &product[..])));
+                    }
+                    sum_results
+                }
+                &Node::Evaluated { .. } => unreachable!()
+            };
+            results.push(node_results);
+            forest.graph[i] = Node::Evaluated { values: results.len() as u32 - 1 };
+        }
+        // let res = self.evaluate_rec(forest, finished_node);
+        // res.into_iter().next().expect("incorrect eval count")
+        match &forest.graph[finished_node.0] {
+            &Node::Evaluated { values } => {
+                mem::replace(&mut results[values as usize], vec![])
+            }
+            _ => panic!("eval error")
+        }
     }
+
+    // fn evaluate_rec(&mut self, forest: &mut Forest, handle: NodeHandle) -> Vec<T> {
+    //     match &forest.graph[handle.0] {
+    //         &Node::Sum { ref summands, .. } => {
+    //             assert_eq!(summands.len(), 1);
+    //             let product = summands[0];
+    //             let mut result = self.evaluate_rec(forest, product.left_factor);
+    //             if let Some(factor) = product.right_factor {
+    //                 let v = self.evaluate_rec(forest, factor);
+    //                 result.extend(v);
+    //             }
+    //             if product.action != NULL_ACTION {
+    //                 vec![(self.eval_product)(product.action as u32, &result[..])]
+    //             } else {
+    //                 result
+    //             }
+    //         }
+    //         &Node::Leaf { terminal, values } => {
+    //             vec![(self.eval_leaf)(terminal, values)]
+    //         }
+    //     }
+    // }
 }
 
 #[cfg(test)]
@@ -835,7 +929,7 @@ mod tests {
         grammar.rule(op_sum).rhs([op_plus]).id(12).build();
         grammar.start_symbol(sum);
         let binarized_grammar = grammar.binarize();
-        let mut recognizer = Recognizer::new(binarized_grammar);
+        let mut recognizer = Recognizer::new(&binarized_grammar);
 
         #[derive(Logos)]
         enum Token {
@@ -881,7 +975,7 @@ mod tests {
         }
         let finished_node = recognizer.finished_node().expect("parse failed");
         let mut evaluator = Evaluator::new(
-            |rule_id, args: &[(f64, u32)]| {
+            |rule_id, args: &[&(f64, u32)]| {
                 match rule_id {
                     0 => {
                         let (left, op, right) = (args[0].0, args[1].1, args[2].0);
@@ -944,16 +1038,16 @@ mod tests {
             |terminal, values| {
                 let span = spans[values as usize].clone();
                 let slice = &expr[span];
-                if terminal == digit {
+                vec![if terminal == digit {
                     ((slice.chars().nth(0).unwrap() as u32 - ('0' as u32)) as f64, 1)
                 } else if terminal == op_factor {
                     (0f64, slice.chars().nth(0).unwrap() as u32)
                 } else {
                     (0f64, 0)
-                }
+                }]
             }
         );
-        evaluator.evaluate(&mut recognizer.forest, finished_node).0
+        evaluator.evaluate(&mut recognizer.forest, finished_node).first().expect("evaluation failed").0
     }
     
     fn test(expr: &str, expected: f64) {

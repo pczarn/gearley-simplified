@@ -4,7 +4,7 @@ require 'pry'
 class Rule < Struct.new(:lhs, :rhs, :type, :action)
 end
 
-class Grammar < Struct.new(:rules, :terminals_by_ident)
+class Grammar < Struct.new(:name, :rules, :terminals_by_ident)
 end
 
 class Lexer < Struct.new(:terminals, :ignore, :error)
@@ -147,11 +147,11 @@ class RsGenerator
     end
 
     def parser_grammar
-        Grammar.new(rules, lexer.terminals)
+        Grammar.new("parser", rules, lexer.terminals)
     end
 
     def lexer_grammar
-        Grammar.new(lexer_rules, terminals)
+        Grammar.new("lexer", lexer_rules, terminals)
     end
 
     def lexer_rule_actions
@@ -176,8 +176,8 @@ class RsGenerator
 
     def lexer_terminal_rules
         lexer.terminals.flat_map do |ident, tokens|
-            tokens.map do |token|
-                Rule.new(Sym.new("_content" + ident), lexer_rhs(token), nil, nil)
+            tokens.flat_map do |token|
+                lexer_rules(Sym.new("_content" + ident), token)
             end
         end
     end
@@ -215,49 +215,95 @@ class RsGenerator
     class InputClass < Struct.new(:ranges, :negate)
     end
 
-    def lexer_rhs token
+    def parse_regexp string
+        string.scan(TOKEN_REGEXP_CHAR_REGEXP).map do |dot, klass, literal, escaped|
+            string = literal || escaped
+            if dot
+                next InputKlass.new(["\u00" .. "\u10FFFF"], false)
+            elsif klass
+                negate = false
+                ranges = klass.scan(TOKEN_REGEXP_CHAR_REGEXP_MATCH).map do |negative, range, range_end, literal, escaped|
+                    negate = true if negative
+                    string = literal || escaped
+                    if range
+                        raise "incorrect range" if range > range_end
+                        range .. range_end
+                    elsif string
+                        string .. string
+                    end
+                end
+                next InputKlass.new(ranges, negate)
+            elsif string
+                next InputKlass.new([string .. string], false)
+            else
+                raise "unreachable"
+            end
+        end
+    end
+
+    def lexer_rules lhs, token
         # TODO lexer rhs
         if token.kind == :literal
-            token.string.split('').map do |char|
-                char_terminal_sym char
+            klasses = token.string.split('').map do |char|
+                InputKlass.new(char)
             end
+            rhs = klasses.map {|k| char_terminal_sym k }
+            [Rule.new(lhs, rhs, nil, nil)]
         elsif token.kind == :regexp
-            klasses = token.string.scan(TOKEN_REGEXP_CHAR_REGEXP).map do |dot, klass, literal, escaped|
-                string = literal || escaped
-                if dot
-                    next InputKlass.new(["\u00" .. "\u10FFFF"], false)
-                elsif klass
-                    negate = false
-                    ranges = klass.scan(TOKEN_REGEXP_CHAR_REGEXP_MATCH).map do |negative, range, range_end, literal, escaped|
-                        negate = true if negative
-                        string = literal || escaped
-                        if range
-                            raise "incorrect range" if range > range_end
-                            range .. range_end
-                        elsif string
-                            string .. string
-                        end
-                    end
-                    next InputKlass.new(ranges, negate)
-                elsif string
-                    next InputKlass.new([string .. string], false)
-                end
-            end
-
+            klasses = parse_regexp(token.string)
+            rhs = klasses.map {|k| char_terminal_sym k }
+            [Rule.new(lhs, rhs, nil, nil)]
         end
     end
 
     def char_terminal_sym klass
+        klass.ranges.sort_by! {|range| [range.first, range.last] }
+        klass.ranges.uniq!
         @input_table_char ||= {}
         @input_table_char[klass] ||= Sym.new("match_class#{@input_table_char.size}")
         @input_table_char[klass]
     end
 
+    class AnyInputMatcher < Struct.new(:sym_name)
+    end
+
+    class InputMatcher < Struct.new(:sym_name, :ranges, :negate)
+    end
+
     def lexer_input_cases
-        # TODO input char to terminal
-        lexer.terminals.
+        @input_table_char.flat_map do |klass, sym|
+            if klass.ranges == ['\x00' .. '\u10FFFF']
+                if klass.negate
+                    []
+                else
+                    [AnyInputMatcher.new(sym.name)]
+            else
+                InputMatcher.new(
+                    sym.name,
+                    klass.ranges,
+                    klass.negate,
+                )
+            end
+        end
         # for example, 
-        []
+        # dot = /./
+        # alnum = /[0-9a-zA-Z_]/
+        # not_digit = /[^0-9]/
+        # match input_char {
+        #     '\x00' ..= '\u10FFFF' => { scan("match_class0") }
+        #     _ => {}
+        # }
+
+        # scan("match_class0");
+        # match input_char {
+        #     '0' ..= '9' | 'a' ..= 'z' | 'A' ..= 'Z' | '_' => { scan("match_class1") }
+        #     _ => {}
+        # }
+        # match input_char {
+        #     '0' ..= '9' | 'a' ..= 'z' | 'A' ..= 'Z' | '_' => { scan("match_class2") }
+        #     _ => {}
+        # }
+
     end
 
     def lexer_start_sym
@@ -292,6 +338,10 @@ class RsGenerator
             rhs = rule.rhs.map {|sym| "sym_#{sym.name}" }.join(", ")
             "grammar.rule(#{lhs}).rhs([#{rhs}]).id(#{i}).build();"
         end.join("\n")
+    end
+
+    def grammars
+        [parser_grammar, lexer_grammar]
     end
 
     def generate_grammar name, for_grammar
@@ -432,18 +482,15 @@ class RsGenerator
         "RsTy#{rule.lhs.name.camel_case}"
     end
 
-    def auto_rule_fields rule
-        bound_syms(rule).map do |sym|
-            "#{sym.bind}: RsTy#{sym.name.camel_case},"
-        end.join(" ")
+    class AutoDecl < Struct.new(:lhs_name, :bound_syms)
     end
 
     def auto_decls
         rules.each.filter do |rule|
             rule.action.nil? && !bound_syms(rule).empty?
         end.map do |rule|
-            "#[derive(Clone)] pub struct #{rule_type(rule)} { #{auto_rule_fields(rule)} }"
-        end.uniq.join("\n")
+            AutoDecl.new(rule.lhs, bound_syms(rule))
+        end.uniq
     end
 
     def error_attrs
@@ -462,7 +509,7 @@ class RsGenerator
     end
 
     def rule_value_variants
-        rules.group_by(&:lhs).map do |lhs, rules|
+        rules.map(&:lhs).uniq.map do |lhs|
             "#{lhs.name}(RsTy#{lhs.name.camel_case}),"
         end.join("\n")
     end
@@ -523,199 +570,8 @@ class RsGenerator
     end
 
     def generate
-        #{generate_grammar("lexer", lexer_grammar)}
-        <<-RUST
-            extern crate gearley_simplified;
-
-            use gearley_simplified::{Grammar, BinarizedGrammar, Evaluator, Forest, Recognizer};
-
-            #{custom_decls}
-            #{auto_decls}
-            #{type_decls}
-
-            #{generate_grammar("parser", parser_grammar)}
-            #{generate_grammar("lexer", lexer_grammar)}
-
-            enum Token {
-                #{lexer_variants}
-                #{error_attrs}
-                Error,
-            }
-            #[derive(Clone)]
-            #[allow(non_camel_case_types)]
-            enum Value {
-                None,
-                #{rule_value_variants}
-                #{terminal_value_variants}
-            }
-            
-            type Span = (usize, usize);
-
-            struct EarlemeInfo {
-                expr: String,
-                ordinals: Vec<usize>,
-                scan: Vec<&'static str>,
-            }
-
-            impl EarlemeInfo {
-                fn new() -> Self {
-                    EarlemeInfo {
-                        expr: String::new(),
-                        ordinals: vec![],
-                        scan: vec![],
-                    }
-                }
-            }
-
-            struct Lexer {
-                grammar: BinarizedGrammar,
-                recognizer: Recognizer,
-            }
-
-            impl Lexer {
-                fn new() -> Self {
-                    let grammar = make_lexer_grammar();
-                    let recognizer = Recognizer::new(&grammar);
-                    Lexer { grammar, recognizer }
-                }
-
-                fn lex(&mut self, expr: &str, parser: &mut Parser) -> Vec<EarlemeInfo> {
-                    let mut earlemes = vec![];
-                    let mut input = expr.chars().peekable();
-                    while input.peek().is_some() {
-                        if let Some(earleme_info) = self.lex_one(&mut input, parser) {
-                            parser.recognizer.begin_earleme();
-                            for &terminal in &earleme_info.scan {
-                                parser.recognizer.scan(parser.grammar.sym(terminal), earlemes.len() as u32);
-                            }
-                            if !parser.recognizer.end_earleme() {
-                                eprintln!("actual: {}", parser.recognizer.terminal_name(terminal));
-                                parser.recognizer.log_last_earley_set();
-                                let start = earlemes.map(|e| e.expr.len()).sum::<usize>();
-                                let end = start + earleme_info.expr.len();
-                                panic!(
-                                    "lexing failed at string {:?} at input range {:?}",
-                                    earleme_info.expr,
-                                    (start, end),
-                                );
-                            }
-                            earlemes.push(earleme_info);
-                        } else {
-                            let pos = earlemes.map(|e| e.expr.len()).sum::<usize>();
-                            panic!("lexing error at {:?}", pos);
-                        }
-                    }
-                }
-
-                fn lex_one(&mut self, expr: &mut impl Iterator<Item=char>, parser: &Parser) -> EarlemeInfo {
-                    let mut cur = input.clone().enumerate();
-                    let mut lexer_finished_node = None;
-                    let mut num_chars_consumed = 0;
-                    let mut earleme = EarlemeInfo::new();
-                    self.recognizer.reset();
-                    self.recognizer.begin_earleme();
-                    for expected in parser.recognizer.predicted() {
-                        let sym_name = format!("_guard_{}", parser.grammar.sym_name(expected).unwrap());
-                        self.recognizer.scan(self.grammar.sym(&sym_name[..]));
-                    }
-                    self.recognizer.end_earleme();
-                    while let Some((i, input_char)) = cur.next() {
-                        earleme.expr.push(input_char);
-                        self.recognizer.begin_earleme();
-                        let terminals = match input_char {
-                            #{map_input_char_to_terminals}
-                        };
-                        // earleme.ordinals.push(ordinal);
-                        for &sym_name in terminals {
-                            self.recognizer.scan(self.grammar.sym(sym_name), lex_earlemes.len() as u32 - 1);
-                        }
-                        if self.recognizer.end_earleme() {
-                            let finished_node = self.recognizer.finished_node();
-                            if finished_node.is_some() {
-                                lexer_finished_node = finished_node;
-                                num_chars_consumed = i;
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                    if let Some(finished_node) = lexer_finished_node {
-                        for _ in 0 .. num_chars_consumed {
-                            earleme.expr.push(input.next().unwrap());
-                        }
-                        let rule_eval = |rule_id, args: &[&Option<&'static str>]| {
-                            match rule_id {
-                                #{lexer_rule_actions}
-                                other => panic!("unknown rule id {}", other)
-                            }
-                        };
-                        let terminal_eval = |terminal, values| {
-                            // let info = &earlemes[values as usize];
-                            // let ordinal = ordinals[values as usize];
-                            // let slice = expr[span].to_string();
-                            // vec![# {lexer_terminal_actions}
-                            // else {
-                            //     Value::None
-                            // }]
-                            vec![None]
-                        };
-                        
-                        let mut evaluator = Evaluator::new(rule_eval, terminal_eval);
-                        let eval_result = evaluator.evaluate(recognizer.forest_mut(), finished_node);
-                        earleme.scan = eval_result.into_iter().map(|r| r.expect("incorrect evaluation: non-toplevel rule in result")).collect();
-                        Some(earleme)
-                    } else {
-                        None
-                    }
-                }
-            }
-
-            struct Parser {
-                grammar: BinarizedGrammar,
-                recognizer: Recognizer,
-            }
-
-            impl Parser {
-                fn new() -> Self {
-                    let grammar = make_parser_grammar();
-                    let recognizer = Recognizer::new(&grammar);
-                    Parser { grammar, recognizer }
-                }
-            }
-
-            #[allow(unused_braces)]
-            pub fn parse(expr: &str) -> #{result_type} {
-                let mut parser = Parser::new();
-                let mut lexer = Lexer::new();
-                let earlemes = lexer.lex(expr, &mut parser);
-                let finished_node = recognizer.finished_node().expect("parse failed");
-                let rule_eval = |rule_id, args: &[&Value]| {
-                    match rule_id {
-                        #{rule_actions}
-                        other => panic!("unknown rule id {}", other)
-                    }
-                };
-                let terminal_eval = |terminal, values| {
-                    let info = &earlemes[values as usize];
-
-                    let ordinal = ordinals[values as usize];
-                    let slice = expr[span].to_string();
-                    #{terminal_actions}
-                    else {
-                        Value::None
-                    }
-                };
-                let mut evaluator = Evaluator::new(rule_eval, terminal_eval);
-                let result = evaluator.
-                (recognizer.forest_mut(), finished_node);
-                match result {
-                    Value::#{result_variant}(val) => val,
-                    _ => panic!("incorrect result of eval")
-                }
-            }
-
-            #{test_fns}
-        RUST
+        rhtml = ERB.new(File.read("rs-template.erb"), nil, '%')
+        rhtml.run(binding)
     end
 end
 

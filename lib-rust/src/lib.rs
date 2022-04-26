@@ -300,6 +300,10 @@ impl BinarizedGrammar {
     pub fn sym(&self, name: &str) -> Option<Symbol> {
         self.symbol_source.sym(name)
     }
+
+    pub fn sym_name(&self, sym: Symbol) -> Option<&str> {
+        self.symbol_source.symbol_names.get(sym.usize()).map(|s| &s[..])
+    }
 }
 
 impl<'a> RuleBuilder<'a> {
@@ -367,6 +371,14 @@ impl Recognizer {
         };
         // self.earley_chart.push(mem::replace(&mut self.next_set, EarleySet::new(self.tables.num_syms)));
         self.earley_chart.push(es);
+    }
+
+    pub fn reset(&mut self) {
+        self.earley_chart.clear();
+        self.next_set = EarleySet::new(self.tables.num_syms);
+        self.complete.clear();
+        self.finished_node = None;
+        self.initialize();
     }
 
     pub fn begin_earleme(&mut self) {

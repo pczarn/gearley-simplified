@@ -16,8 +16,8 @@ alnum_str -> String ::= s:alnum_str ch:alnum => { s.push(ch); s } | ch:alnum => 
 ')' -> rparen
 '+' -> op_plus
 '*' -> op_star
-/[a-z][A-Z]/ -> alpha : char { slice.chars().next().unwrap() }
-/[0-9][a-z][A-Z]_/ -> alnum : char { slice.chars().next().unwrap() }
+/[a-zA-Z]/ -> alpha : char { slice.chars().next().unwrap() }
+/[0-9a-zA-Z_]/ -> alnum : char { slice.chars().next().unwrap() }
 '\'' -> quote
 '"' -> doublequote
 /./ -> any : char { slice.chars().next().unwrap() }

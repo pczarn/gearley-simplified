@@ -2,33 +2,33 @@ extern crate gearley_simplified;
 
 use gearley_simplified::{Grammar, BinarizedGrammar, Evaluator, Forest, Recognizer};
 
-<%= custom_decls >
+<%= custom_decls %>
 % auto_decls.each do |auto_decl|
     #[derive(Clone)]
-    pub struct RsTy<%= auto_decl.lhs_name > {
+    pub struct RsTy<%= auto_decl.lhs_name %> {
         % auto_decl.bound_syms.each do |sym|
-            <%= sym.bind >: RsTy<%= sym.name.camel_case >,
+            <%= sym.bind %>: RsTy<%= sym.name.camel_case %>,
         % end
     }
-<% end >
-<%= type_decls >
+% end
+<%= type_decls %>
 
 % grammars.each do |grammar|
-    fn make_<%= grammar.name >_grammar() -> BinarizedGrammar {
+    fn make_<%= grammar.name %>_grammar() -> BinarizedGrammar {
         let mut grammar = Grammar::new();
         % sym_names_dedup(grammar).each do |name|
-            let sym_<%= name > = grammar.make_symbol("<%= name >");
+            let sym_<%= name %> = grammar.make_symbol("<%= name %>");
         % end
         % grammar.rules.each_with_index do |rule, i|
-            grammar.rule(sym_<%= rule.lhs.name>).rhs(
+            grammar.rule(sym_<%= rule.lhs.name %>).rhs(
                 [
                     % rule.rhs.each do |sym|
-                        sym_%<= sym.name >
+                        sym_<%= sym.name %>,
                     % end
                 ]
-            ).id(%<= i >).build();
+            ).id(<%= i %>).build();
         % end
-        grammar.start_symbol(sym_<%= start_sym_name(grammar) >);
+        grammar.start_symbol(sym_<%= start_sym_name(grammar) %>);
         grammar.binarize()
     }
 % end
@@ -38,9 +38,9 @@ use gearley_simplified::{Grammar, BinarizedGrammar, Evaluator, Forest, Recognize
 enum Value {
     None,
     % rules.map(&:lhs).uniq.each do |lhs|
-        <%= lhs.name >(RsTy<%= lhs.name.camel_case >),
+        <%= lhs.name %>(RsTy<%= lhs.name.camel_case %>),
     % end
-    <%= terminal_value_variants >
+    <%= terminal_value_variants %>
 }
 
 type Span = (usize, usize);
@@ -99,9 +99,10 @@ impl Lexer {
                 panic!("lexing error at {:?}", pos);
             }
         }
+        earlemes
     }
 
-    fn lex_one(&mut self, expr: &mut impl Iterator<Item=char>, parser: &Parser) -> EarlemeInfo {
+    fn lex_one(&mut self, input: &mut (impl Iterator<Item=char> + Clone), parser: &Parser) -> Option<EarlemeInfo> {
         let mut cur = input.clone().enumerate();
         let mut lexer_finished_node = None;
         let mut num_chars_consumed = 0;
@@ -110,19 +111,34 @@ impl Lexer {
         self.recognizer.begin_earleme();
         for expected in parser.recognizer.predicted() {
             let sym_name = format!("_guard_{}", parser.grammar.sym_name(expected).unwrap());
-            self.recognizer.scan(self.grammar.sym(&sym_name[..]));
+            self.recognizer.scan(self.grammar.sym(&sym_name[..]).unwrap(), 0);
         }
         self.recognizer.end_earleme();
         while let Some((i, input_char)) = cur.next() {
             earleme.expr.push(input_char);
             self.recognizer.begin_earleme();
-            let terminals = match input_char {
-                <%= map_input_char_to_terminals}
+            let scan = |sym_name| {
+                self.recognizer.scan(self.grammar.sym(sym_name).unwrap(), 0);
             };
+            % lexer_input_cases.each do |matcher|
+                % if matcher.is_a? AnyInputMatcher
+                    scan("sym_<%= matcher.sym_name %>");
+                % else
+                    match input_char {
+                        <%= matcher.ranges.join(" | ") %> => {
+                            % if !matcher.negate
+                                scan("sym_<%= matcher.sym_name %>");
+                            % end
+                        }
+                        _ => {
+                            % if matcher.negate
+                                scan("sym_<%= matcher.sym_name %>");
+                            % end
+                        }
+                    }
+                % end
+            % end
             // earleme.ordinals.push(ordinal);
-            for &sym_name in terminals {
-                self.recognizer.scan(self.grammar.sym(sym_name), lex_earlemes.len() as u32 - 1);
-            }
             if self.recognizer.end_earleme() {
                 let finished_node = self.recognizer.finished_node();
                 if finished_node.is_some() {
@@ -139,7 +155,7 @@ impl Lexer {
             }
             let rule_eval = |rule_id, args: &[&Option<&'static str>]| {
                 match rule_id {
-                    <%= lexer_rule_actions}
+                    <%= lexer_rule_actions %>
                     other => panic!("unknown rule id {}", other)
                 }
             };
@@ -155,7 +171,7 @@ impl Lexer {
             };
             
             let mut evaluator = Evaluator::new(rule_eval, terminal_eval);
-            let eval_result = evaluator.evaluate(recognizer.forest_mut(), finished_node);
+            let eval_result = evaluator.evaluate(self.recognizer.forest_mut(), finished_node);
             earleme.scan = eval_result.into_iter().map(|r| r.expect("incorrect evaluation: non-toplevel rule in result")).collect();
             Some(earleme)
         } else {
@@ -178,34 +194,40 @@ impl Parser {
 }
 
 #[allow(unused_braces)]
-pub fn parse(expr: &str) -> <%= result_type} {
+pub fn parse(expr: &str) -> <%= result_type %> {
     let mut parser = Parser::new();
     let mut lexer = Lexer::new();
     let earlemes = lexer.lex(expr, &mut parser);
-    let finished_node = recognizer.finished_node().expect("parse failed");
+    let finished_node = parser.recognizer.finished_node().expect("parse failed");
     let rule_eval = |rule_id, args: &[&Value]| {
         match rule_id {
-            <%= rule_actions}
+            % rule_actions.each do |action|
+                <%= action.index %> => {
+                    % action.args.each do |arg|
+                        let mut <%= arg.bind %> = match args[<%= arg.index %>].clone() { Value::<%= arg.variant %>(val) => val, _ => panic!("wrong sym") };
+                    % end
+                    Value::<%= action.result_variant %>({ <%= action.code %> })
+                }
+            % end
             other => panic!("unknown rule id {}", other)
         }
     };
     let terminal_eval = |terminal, values| {
         let info = &earlemes[values as usize];
-
-        let ordinal = ordinals[values as usize];
-        let slice = expr[span].to_string();
-        <%= terminal_actions}
+        let slice = &info.expr[..];
+        % terminal_actions.each do |action|
+            
+        % end
         else {
             Value::None
         }
     };
     let mut evaluator = Evaluator::new(rule_eval, terminal_eval);
-    let result = evaluator.
-    (recognizer.forest_mut(), finished_node);
+    let result = evaluator.evaluate(parser.recognizer.forest_mut(), finished_node).into_iter().next().expect("evaluation failed");
     match result {
-        Value::<%= result_variant}(val) => val,
+        Value::<%= result_variant %>(val) => val,
         _ => panic!("incorrect result of eval")
     }
 }
 
-<%= test_fns >
+<%= test_fns %>

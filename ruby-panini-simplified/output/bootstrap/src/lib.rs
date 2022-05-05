@@ -1,5 +1,8 @@
 extern crate gearley_simplified;
 
+use std::collections::BTreeMap;
+use std::ops::Range;
+
 use gearley_simplified::{BinarizedGrammar, Evaluator, Forest, Grammar, Recognizer};
 
 #[derive(Clone)]
@@ -328,19 +331,82 @@ enum Value {
 
 type Span = (usize, usize);
 
+// struct ParseInfo {
+//     next_key: usize,
+//     earlemes: BTreeMap<usize, EarlemeInfo>,
+// }
+
+// struct EarlemeInfo {
+//     expr: String,
+//     scan: Vec<usize>,
+// }
+
+// impl EarlemeInfo {
+//     fn new() -> Self {
+//         EarlemeInfo {
+//             expr: String::new(),
+//             scan: vec![],
+//         }
+//     }
+// }
+
+// impl ParseInfo {
+//     fn new() -> Self {
+//         ParseInfo {
+//             next_key: 0,
+//             earlemes: BTreeMap::new(),
+//         }
+//     }
+
+//     fn push(&mut self, earleme_info: EarlemeInfo) {
+//         let scan_len = earleme_info.scan.len();
+//         self.earlemes.insert(self.next_key, earleme_info);
+//         self.next_key += scan_len;
+//     }
+
+//     fn get(&self, index: usize) -> Option<usize> {
+//         use std::ops::Bound::Included;
+//         self.earlemes.range(Included(0), Included(index)).next_back().map(|(&key, value)| value.scan[index - key])
+//     }
+// }
+
+struct ParseInfo {
+    input: String,
+    earlemes: Vec<EarlemeInfo>,
+}
+
+#[derive(Clone)]
 struct EarlemeInfo {
-    expr: String,
-    ordinals: Vec<usize>,
-    scan: Vec<&'static str>,
+    input_range: Range<usize>,
+    terminal: usize,
+}
+
+struct LexResult {
+    input_range: Range<usize>,
+    terminals: Range<usize>,
 }
 
 impl EarlemeInfo {
     fn new() -> Self {
         EarlemeInfo {
-            expr: String::new(),
-            ordinals: vec![],
+            input_range: String::new(),
             scan: vec![],
         }
+    }
+}
+
+impl ParseInfo {
+    fn new() -> Self {
+        ParseInfo {
+            input: String::new(),
+            earlemes: vec![],
+        }
+    }
+
+    fn push(&mut self, terminal: usize) {
+        let scan_len = earleme_info.scan.len();
+        self.earlemes.insert(self.next_key, earleme_info);
+        self.next_key += scan_len;
     }
 }
 
@@ -348,6 +414,22 @@ struct Lexer {
     grammar: BinarizedGrammar,
     recognizer: Recognizer,
 }
+
+const TERMINAL_TO_SYM_NAME: &'static [&'static str] = [
+    "op_bnf",
+    "op_colon",
+    "lparen",
+    "rparen",
+    "op_plus",
+    "op_star",
+    "quote",
+    "doublequote",
+    "slash",
+    "arrow",
+    "alpha",
+    "alnum",
+    "any",
+];
 
 impl Lexer {
     fn new() -> Self {
@@ -359,42 +441,42 @@ impl Lexer {
         }
     }
 
-    fn lex(&mut self, expr: &str, parser: &mut Parser) -> Vec<EarlemeInfo> {
-        let mut earlemes = vec![];
+    fn lex(&mut self, expr: &str, parser: &mut Parser) -> ParseInfo {
+        let mut parse_info = ParseInfo::new();
         let mut input = expr.chars().peekable();
         while input.peek().is_some() {
-            if let Some(earleme_info) = self.lex_one(&mut input, parser) {
+            if let Some(lex_result) = self.lex_one(&mut input, parser, &mut parse_info) {
                 parser.recognizer.begin_earleme();
-                for &terminal in &earleme_info.scan {
-                    parser
-                        .recognizer
-                        .scan(parser.grammar.sym(terminal), earlemes.len() as u32);
+                for &info in &parse_info.earlemes[lex_result.terminals] {
+                    parser.recognizer.scan(
+                        parser.grammar.sym(TERMINAL_TO_SYM_NAME[info.terminal]),
+                        info.terminal as u32,
+                    );
                 }
                 if !parser.recognizer.end_earleme() {
                     eprintln!("actual: {}", parser.recognizer.terminal_name(terminal));
                     parser.recognizer.log_last_earley_set();
-                    let start = earlemes.map(|e| e.expr.len()).sum::<usize>();
-                    let end = start + earleme_info.expr.len();
                     panic!(
                         "lexing failed at string {:?} at input range {:?}",
-                        earleme_info.expr,
-                        (start, end),
+                        &expr[lex_result.input_range],
+                        (lex_result.input_range.start, lex_result.input_range.end),
                     );
                 }
-                earlemes.push(earleme_info);
+                parse_info.push(earleme_info);
             } else {
-                let pos = earlemes.map(|e| e.expr.len()).sum::<usize>();
-                panic!("lexing error at {:?}", pos);
+                let pos = parse_info.input.len();
+                panic!("lexing error at position {:?}", pos);
             }
         }
-        earlemes
+        parse_info
     }
 
     fn lex_one(
         &mut self,
         input: &mut (impl Iterator<Item = char> + Clone),
         parser: &Parser,
-    ) -> Option<EarlemeInfo> {
+        parse_info: &mut ParseInfo,
+    ) -> Option<LexResult> {
         let mut cur = input.clone().enumerate();
         let mut lexer_finished_node = None;
         let mut num_chars_consumed = 0;
@@ -504,36 +586,39 @@ impl Lexer {
             }
         }
         if let Some(finished_node) = lexer_finished_node {
+            let input_range_start = parse_info.input.len();
             for _ in 0..num_chars_consumed {
-                earleme.expr.push(input.next().unwrap());
+                parse_info.input.push(input.next().unwrap());
             }
-            let rule_eval = |rule_id, args: &[&Option<&'static str>]| match rule_id {
-                0 => Some("op_bnf"),
-                1 => Some("op_colon"),
-                2 => Some("lparen"),
-                3 => Some("rparen"),
-                4 => Some("op_plus"),
-                5 => Some("op_star"),
-                6 => Some("quote"),
-                7 => Some("doublequote"),
-                8 => Some("slash"),
-                9 => Some("arrow"),
-                10 => Some("alpha"),
-                11 => Some("alnum"),
-                12 => Some("any"),
-                13 => None,
-                14 => None,
-                15 => None,
-                16 => None,
-                17 => None,
-                18 => None,
-                19 => None,
-                20 => None,
-                21 => None,
-                22 => None,
-                23 => None,
-                24 => None,
-                25 => None,
+            let input_range_end = parse_info.input.len();
+            earleme.input_range = input_range_start..input_range_end;
+            let rule_eval = |rule_id, args: &[&Option<usize>]| match rule_id {
+                0 => Some(args[0].unwrap()),
+                1 => Some(args[0].unwrap()),
+                2 => Some(args[0].unwrap()),
+                3 => Some(args[0].unwrap()),
+                4 => Some(args[0].unwrap()),
+                5 => Some(args[0].unwrap()),
+                6 => Some(args[0].unwrap()),
+                7 => Some(args[0].unwrap()),
+                8 => Some(args[0].unwrap()),
+                9 => Some(args[0].unwrap()),
+                10 => Some(args[0].unwrap()),
+                11 => Some(args[0].unwrap()),
+                12 => Some(args[0].unwrap()),
+                13 => Some(0),
+                14 => Some(1),
+                15 => Some(2),
+                16 => Some(3),
+                17 => Some(4),
+                18 => Some(5),
+                19 => Some(6),
+                20 => Some(7),
+                21 => Some(8),
+                22 => Some(9),
+                23 => Some(10),
+                24 => Some(11),
+                25 => Some(12),
                 other => panic!("unknown rule id {}", other),
             };
             let terminal_eval = |terminal, values| {
@@ -549,11 +634,17 @@ impl Lexer {
 
             let mut evaluator = Evaluator::new(rule_eval, terminal_eval);
             let eval_result = evaluator.evaluate(self.recognizer.forest_mut(), finished_node);
-            earleme.scan = eval_result
-                .into_iter()
-                .map(|r| r.expect("incorrect evaluation: non-toplevel rule in result"))
-                .collect();
-            Some(earleme)
+            let terminals_start = parse_info.earlemes.len();
+            for terminal in eval_result {
+                earleme.terminal =
+                    terminal.expect("incorrect evaluation: non-toplevel rule in result");
+                parse_info.earlemes.push(earleme);
+            }
+            let terminals_end = parse_info.earlemes.len();
+            Some(LexResult {
+                input_range: earleme.input_range.clone(),
+                terminals: terminals_start..terminals_end,
+            })
         } else {
             None
         }
@@ -678,83 +769,41 @@ pub fn parse(expr: &str) -> () {
         other => panic!("unknown rule id {}", other),
     };
     let terminal_eval = |terminal, values| {
-        let info = &earlemes[values as usize];
-        let slice = &info.expr[..];
-        if terminal == grammar.sym("op_bnf").unwrap() {
-            Value::op_bnf(if ordinal == 0 {
-            } else {
-                unreachable!()
-            })
-        } else if terminal == grammar.sym("op_colon").unwrap() {
-            Value::op_colon(if ordinal == 0 {
-            } else {
-                unreachable!()
-            })
-        } else if terminal == grammar.sym("lparen").unwrap() {
-            Value::lparen(if ordinal == 0 {
-            } else {
-                unreachable!()
-            })
-        } else if terminal == grammar.sym("rparen").unwrap() {
-            Value::rparen(if ordinal == 0 {
-            } else {
-                unreachable!()
-            })
-        } else if terminal == grammar.sym("op_plus").unwrap() {
-            Value::op_plus(if ordinal == 0 {
-            } else {
-                unreachable!()
-            })
-        } else if terminal == grammar.sym("op_star").unwrap() {
-            Value::op_star(if ordinal == 0 {
-            } else {
-                unreachable!()
-            })
-        } else if terminal == grammar.sym("quote").unwrap() {
-            Value::quote(if ordinal == 0 {
-            } else {
-                unreachable!()
-            })
-        } else if terminal == grammar.sym("doublequote").unwrap() {
-            Value::doublequote(if ordinal == 0 {
-            } else {
-                unreachable!()
-            })
-        } else if terminal == grammar.sym("slash").unwrap() {
-            Value::slash(if ordinal == 0 {
-            } else {
-                unreachable!()
-            })
-        } else if terminal == grammar.sym("arrow").unwrap() {
-            Value::arrow(if ordinal == 0 {
-            } else {
-                unreachable!()
-            })
-        } else if terminal == grammar.sym("alpha").unwrap() {
-            Value::alpha(if ordinal == 0 {
-                slice.chars().next().unwrap()
-            } else {
-                unreachable!()
-            })
-        } else if terminal == grammar.sym("alnum").unwrap() {
-            Value::alnum(if ordinal == 0 {
-                slice.chars().next().unwrap()
-            } else {
-                unreachable!()
-            })
-        } else if terminal == grammar.sym("any").unwrap() {
-            Value::any(if ordinal == 0 {
-                slice.chars().next().unwrap()
-            } else {
-                unreachable!()
-            })
+        // let info = &earlemes[values as usize];
+        // let slice = &info.expr[..];
+        if values == 0 {
+            Value::op_bnf({})
+        } else if values == 1 {
+            Value::op_colon({})
+        } else if values == 2 {
+            Value::lparen({})
+        } else if values == 3 {
+            Value::rparen({})
+        } else if values == 4 {
+            Value::op_plus({})
+        } else if values == 5 {
+            Value::op_star({})
+        } else if values == 6 {
+            Value::quote({})
+        } else if values == 7 {
+            Value::doublequote({})
+        } else if values == 8 {
+            Value::slash({})
+        } else if values == 9 {
+            Value::arrow({})
+        } else if values == 10 {
+            Value::alpha({ slice.chars().next().unwrap() })
+        } else if values == 11 {
+            Value::alnum({ slice.chars().next().unwrap() })
+        } else if values == 12 {
+            Value::any({ slice.chars().next().unwrap() })
         } else {
             Value::None
         }
     };
     let mut evaluator = Evaluator::new(rule_eval, terminal_eval);
     let result = evaluator
-        .evaluate(recognizer.forest_mut(), finished_node)
+        .evaluate(parser.recognizer.forest_mut(), finished_node)
         .into_iter()
         .next()
         .expect("evaluation failed");

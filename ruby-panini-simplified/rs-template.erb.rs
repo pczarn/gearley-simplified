@@ -1,5 +1,8 @@
 extern crate gearley_simplified;
 
+use std::collections::BTreeMap;
+use std::ops::Range;
+
 use gearley_simplified::{Grammar, BinarizedGrammar, Evaluator, Forest, Recognizer};
 
 <%= custom_decls %>
@@ -45,19 +48,82 @@ enum Value {
 
 type Span = (usize, usize);
 
+// struct ParseInfo {
+//     next_key: usize,
+//     earlemes: BTreeMap<usize, EarlemeInfo>,
+// }
+
+// struct EarlemeInfo {
+//     expr: String,
+//     scan: Vec<usize>,
+// }
+
+// impl EarlemeInfo {
+//     fn new() -> Self {
+//         EarlemeInfo {
+//             expr: String::new(),
+//             scan: vec![],
+//         }
+//     }
+// }
+
+// impl ParseInfo {
+//     fn new() -> Self {
+//         ParseInfo {
+//             next_key: 0,
+//             earlemes: BTreeMap::new(),
+//         }
+//     }
+
+//     fn push(&mut self, earleme_info: EarlemeInfo) {
+//         let scan_len = earleme_info.scan.len();
+//         self.earlemes.insert(self.next_key, earleme_info);
+//         self.next_key += scan_len;
+//     }
+
+//     fn get(&self, index: usize) -> Option<usize> {
+//         use std::ops::Bound::Included;
+//         self.earlemes.range(Included(0), Included(index)).next_back().map(|(&key, value)| value.scan[index - key])
+//     }
+// }
+
+struct ParseInfo {
+    input: String,
+    earlemes: Vec<EarlemeInfo>,
+}
+
+#[derive(Clone)]
 struct EarlemeInfo {
-    expr: String,
-    ordinals: Vec<usize>,
-    scan: Vec<&'static str>,
+    input_range: Range<usize>,
+    terminal: usize,
+}
+
+struct LexResult {
+    input_range: Range<usize>,
+    terminals: Range<usize>,
 }
 
 impl EarlemeInfo {
     fn new() -> Self {
         EarlemeInfo {
-            expr: String::new(),
-            ordinals: vec![],
+            input_range: String::new(),
             scan: vec![],
         }
+    }
+}
+
+impl ParseInfo {
+    fn new() -> Self {
+        ParseInfo {
+            input: String::new(),
+            earlemes: vec![],
+        }
+    }
+
+    fn push(&mut self, terminal: usize) {
+        let scan_len = earleme_info.scan.len();
+        self.earlemes.insert(self.next_key, earleme_info);
+        self.next_key += scan_len;
     }
 }
 
@@ -66,6 +132,12 @@ struct Lexer {
     recognizer: Recognizer,
 }
 
+const TERMINAL_TO_SYM_NAME: &'static [&'static str] = [
+    % terminal_sym_names.each do |name|
+        "<%= name %>",
+    % end
+];
+
 impl Lexer {
     fn new() -> Self {
         let grammar = make_lexer_grammar();
@@ -73,36 +145,34 @@ impl Lexer {
         Lexer { grammar, recognizer }
     }
 
-    fn lex(&mut self, expr: &str, parser: &mut Parser) -> Vec<EarlemeInfo> {
-        let mut earlemes = vec![];
+    fn lex(&mut self, expr: &str, parser: &mut Parser) -> ParseInfo {
+        let mut parse_info = ParseInfo::new();
         let mut input = expr.chars().peekable();
         while input.peek().is_some() {
-            if let Some(earleme_info) = self.lex_one(&mut input, parser) {
+            if let Some(lex_result) = self.lex_one(&mut input, parser, &mut parse_info) {
                 parser.recognizer.begin_earleme();
-                for &terminal in &earleme_info.scan {
-                    parser.recognizer.scan(parser.grammar.sym(terminal), earlemes.len() as u32);
+                for &info in &parse_info.earlemes[lex_result.terminals] {
+                    parser.recognizer.scan(parser.grammar.sym(TERMINAL_TO_SYM_NAME[info.terminal]), info.terminal as u32);
                 }
                 if !parser.recognizer.end_earleme() {
                     eprintln!("actual: {}", parser.recognizer.terminal_name(terminal));
                     parser.recognizer.log_last_earley_set();
-                    let start = earlemes.map(|e| e.expr.len()).sum::<usize>();
-                    let end = start + earleme_info.expr.len();
                     panic!(
                         "lexing failed at string {:?} at input range {:?}",
-                        earleme_info.expr,
-                        (start, end),
+                        &expr[lex_result.input_range],
+                        (lex_result.input_range.start, lex_result.input_range.end),
                     );
                 }
-                earlemes.push(earleme_info);
+                parse_info.push(earleme_info);
             } else {
-                let pos = earlemes.map(|e| e.expr.len()).sum::<usize>();
-                panic!("lexing error at {:?}", pos);
+                let pos = parse_info.input.len();
+                panic!("lexing error at position {:?}", pos);
             }
         }
-        earlemes
+        parse_info
     }
 
-    fn lex_one(&mut self, input: &mut (impl Iterator<Item=char> + Clone), parser: &Parser) -> Option<EarlemeInfo> {
+    fn lex_one(&mut self, input: &mut (impl Iterator<Item=char> + Clone), parser: &Parser, parse_info: &mut ParseInfo) -> Option<LexResult> {
         let mut cur = input.clone().enumerate();
         let mut lexer_finished_node = None;
         let mut num_chars_consumed = 0;
@@ -150,12 +220,23 @@ impl Lexer {
             }
         }
         if let Some(finished_node) = lexer_finished_node {
+            let input_range_start = parse_info.input.len();
             for _ in 0 .. num_chars_consumed {
-                earleme.expr.push(input.next().unwrap());
+                parse_info.input.push(input.next().unwrap());
             }
-            let rule_eval = |rule_id, args: &[&Option<&'static str>]| {
+            let input_range_end = parse_info.input.len();
+            earleme.input_range = input_range_start .. input_range_end;
+            let rule_eval = |rule_id, args: &[&Option<usize>]| {
                 match rule_id {
-                    <%= lexer_rule_actions %>
+                    % lexer_rule_actions.each do |action|
+                        <%= action.index %> => {
+                            % if action.code
+                                Some(<%= action.code %>)
+                            % else
+                                None
+                            % end
+                        }
+                    % end
                     other => panic!("unknown rule id {}", other)
                 }
             };
@@ -172,8 +253,16 @@ impl Lexer {
             
             let mut evaluator = Evaluator::new(rule_eval, terminal_eval);
             let eval_result = evaluator.evaluate(self.recognizer.forest_mut(), finished_node);
-            earleme.scan = eval_result.into_iter().map(|r| r.expect("incorrect evaluation: non-toplevel rule in result")).collect();
-            Some(earleme)
+            let terminals_start = parse_info.earlemes.len();
+            for terminal in eval_result {
+                earleme.terminal = terminal.expect("incorrect evaluation: non-toplevel rule in result");
+                parse_info.earlemes.push(earleme);
+            }
+            let terminals_end = parse_info.earlemes.len();
+            Some(LexResult {
+                input_range: earleme.input_range.clone(),
+                terminals: terminals_start .. terminals_end,
+            })
         } else {
             None
         }
@@ -213,12 +302,14 @@ pub fn parse(expr: &str) -> <%= result_type %> {
         }
     };
     let terminal_eval = |terminal, values| {
-        let info = &earlemes[values as usize];
-        let slice = &info.expr[..];
+        // let info = &earlemes[values as usize];
+        // let slice = &info.expr[..];
         % terminal_actions.each do |action|
-            
+            if values == <%= action.index %> {
+                Value::<%= action.variant %>({ <%= action.code %> })
+            } else
         % end
-        else {
+        {
             Value::None
         }
     };
@@ -230,4 +321,9 @@ pub fn parse(expr: &str) -> <%= result_type %> {
     }
 }
 
-<%= test_fns %>
+% test_fns.each do |fn|
+    #[test]
+    fn <%= "test_example_" + fn.name >() {
+        parse(r###"<%= fn.string >"###);
+    }
+%

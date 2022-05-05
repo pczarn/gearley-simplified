@@ -1,4 +1,5 @@
 require 'erb'
+require 'forwardable'
 
 class Rule < Struct.new(:lhs, :rhs, :type, :action)
 end
@@ -21,37 +22,6 @@ end
 # terminals is {[digit, /0-9/], []]
 #ignore is [regex, str]
 
-TOKEN_REGEX = /
-    '(.+)'  \s*
-    ->      \s*
-    (\w+)   \s*
-    (?:
-        :       \s*
-        (\w+)   \s*
-        {(.*)}
-    )?
-/x
-TOKEN_REGEX_REGEX = /
-    \/(.+)\/    \s*
-    ->          \s*
-    (\w+)       \s*
-    (?:
-        :       \s*
-        (\w+)   \s*
-        {(.*)}
-    )?
-/x
-
-RULE_REGEXP = /
-    (?<lhs>\w+)     \s* # lhs
-    (?:
-        ->
-        (?<type>.*)
-    )?
-    ::=             \s*
-    (?<rhs>.+) # rhs
-    \n
-/x
 
 class String
     def camel_case
@@ -62,6 +32,181 @@ end
 
 def escape_double_quotes str
     str.gsub("\"", "\\\"")
+end
+
+module Rs
+    module LexerReader
+        TOKEN_REGEX = /
+            '(.+)'  \s*
+            ->      \s*
+            (\w+)   \s*
+            (?:
+                :       \s*
+                (\w+)   \s*
+                {(.*)}
+            )?
+        /x
+        TOKEN_REGEX_REGEX = /
+            \/(.+)\/    \s*
+            ->          \s*
+            (\w+)       \s*
+            (?:
+                :       \s*
+                (\w+)   \s*
+                {(.*)}
+            )?
+        /x
+
+        def literal_tokens
+            grammar_str.scan(TOKEN_REGEX).map do |s, ident, type, code|
+                Token.new(:literal, ident, s, type, code)
+            end
+        end
+    
+        def regexp_tokens
+            grammar_str.scan(TOKEN_REGEX_REGEX).map do |regexp, ident, type, code|
+                Token.new(:regexp, ident, regexp, type, code)
+            end
+        end
+    
+        def tokens
+            literal_tokens_array + regexp_tokens_array
+        end
+
+        class Example < Struct.new(:name, :string)
+        end
+        
+        EXAMPLE_REGEXP = /
+            example \s* \( \s* name \s* : \s* (?<name>.*) \s* \) \s* begin \n
+                (?<string>[\s\S]+)
+            \n end \b
+        /x
+        
+        def examples
+            @grammar_str.scan(EXAMPLE_REGEXP).map do |example|
+                Example.new(example[0], example[1])
+            end
+        end
+    end
+
+    class LexerGenerator
+        include LexerReader
+
+        def tokens_by_kind_and_string
+            Hash[tokens.map {|t| [[t.kind, t.string], t.ident] }]
+        end
+    
+        def literal_by_string shorthand
+            tokens_by_kind_and_string[[:literal, shorthand]]
+        end
+    
+        def regexp_by_string shorthand
+            tokens_by_kind_and_string[[:regexp, shorthand]]
+        end
+    end
+
+    module ParserReader
+        RULE_REGEXP = /
+            (?<lhs>\w+)     \s* # lhs
+            (?:
+                ->
+                (?<type>.*)
+            )?
+            ::=             \s*
+            (?<rhs>.+) # rhs
+            \n
+        /x
+
+        RHS_SYM_REGEXP = /
+            \A
+            (?:
+                (?<bind> [_a-zA-Z]\w* )
+                :
+            )?
+            (?<sym>
+                (?<literal> '(.+)' ) |
+                (?<regexp> \/.+\/ ) |
+                (?<name> [_a-zA-Z]\w* )
+            )
+            \Z
+        /x
+
+        RHS_SHORTHAND_REGEXP = /
+            \A
+            (?<literal> '(.+)' ) |
+            (?<regexp> \/.+\/ )
+            \Z
+        /x
+
+        class RuleAst < Struct.new(:lhs, :rhs, :type, :action)
+        end
+
+        def rule_asts
+            grammar_str.scan(RULE_REGEXP).flat_map do |lhs, type, rhs|
+                rhs.split('|').map(&:strip).map do |alt|
+                    rhs_str, code = alt.split(' => ')
+                    rhs_syms = rhs_str.split(/\s+/).map do |sym|
+                        match = sym.match(BOUND_SYM_REGEXP)
+                        raise "wrong symbol #{sym}" if match.nil?
+                        Sym.new(name[:sym], match[:bind])
+                    end
+                    if code
+                        code = code.strip[/\A\{(.+)\}\Z/, 1]
+                        raise "wrong code in #{alt}" if code.nil?
+                    end
+                    RuleAst.new(lhs, rhs_syms, type, code)
+                end
+            end
+        end
+    end
+
+    class ParserGenerator < LexerGenerator
+        include ParserReader
+
+        class Rule < Struct.new(:lhs, :rhs, :type, :action)
+        end
+
+        def terminal_name shorthand
+
+        end
+    
+        def rules
+            rule_asts.map do |rule|
+                rhs = rule.rhs.map do |sym|
+                    new_sym = sym
+                    if match = sym.name.match(RHS_SHORTHAND_REGEXP)
+                        if match[:literal]
+                            new_sym = Sym.new(terminal_name(match[:literal]), sym.bind) 
+                        else
+                            new_sym = Sym.new(terminal_name(match[:regexp]), sym.bind) 
+                        end
+                    end
+                    raise "unknown symbol #{sym.inspect}" if sym.name.nil?
+                    new_sym
+                end
+                Rule.new(rule.lhs, rhs, type, code)
+            end
+        end
+    end
+
+    class Generator
+        def_delegators :@lexer, :
+        def_delegators :@parser, :
+
+        attr_reader :grammar_str
+
+        def initialize grammar_str
+            @lexer = LexerGenerator.new grammar_str
+            @parser = ParserGenerator.new grammar_str
+        end
+
+        def generate
+            template = File.read("rs-template.erb.rs")
+            template.gsub!(/^\s+% /, '% ')
+            rhtml = ERB.new(template, trim_mode: '%')
+            rhtml.result(binding)
+        end
+    end
 end
 
 class RsGenerator
@@ -151,14 +296,13 @@ class RsGenerator
         Grammar.new("lexer", lexer_rules, terminals)
     end
 
+    class LexerRuleAction < Struct.new(:index, :code)
+    end
+
     def lexer_rule_actions
         lexer_rules.each_with_index.map do |rule, i|
-            if rule.action
-                "#{i} => { Some(#{rule.action}) }"
-            else
-                "#{i} => { None }"
-            end
-        end.join("\n")
+            LexerRuleAction.new(i, rule.action)
+        end
     end
 
     def lexer_rules
@@ -167,18 +311,24 @@ class RsGenerator
 
     def lexer_toplevel_rules
         lexer.terminals.map do |ident, tokens|
-            Rule.new(lexer_start_sym, [Sym.new("_guard_" + ident, nil), Sym.new("_content" + ident)], "&'static str", "\"#{ident}\"")
+            Rule.new(lexer_start_sym, [Sym.new("_guard_" + ident, nil), Sym.new("_content" + ident, "arg")], "usize", "args[0].unwrap()")
+        end
+    end
+
+    def all_tokens
+        lexer.terminals.flat_map do |ident, tokens|
+            tokens.map do |token|
+                [ident, token]
+            end
         end
     end
 
     def lexer_terminal_rules
-        lexer.terminals.flat_map do |ident, tokens|
-            tokens.map do |token|
-                rhs = lexer_klasses_for_token(token).map do |klass|
-                    lexer_input_table[klass]
-                end
-                Rule.new(Sym.new("_content" + ident), rhs, nil, nil)
+        all_tokens.each_with_index.map do |(ident, token), i|
+            rhs = lexer_klasses_for_token(token).map do |klass|
+                lexer_input_table[klass]
             end
+            Rule.new(Sym.new("_content" + ident), rhs, "usize", i.to_s)
         end
     end
 
@@ -376,7 +526,7 @@ class RsGenerator
         \n end \b
     /x
 
-    def custom_toplevel_code language
+    def custom_toplevel_code langua<ge
         @grammar_str.scan(CODE_REGEXP).map do |decl|
             Code.new(decl[0], decl[1])
         end.filter do |decl|
@@ -533,17 +683,29 @@ class RsGenerator
         end.join("\n")
     end
     
+    class TerminalAction < Struct.new(:index, :variant, :code)
+    end
+
     def terminal_actions
+        all_tokens.each_with_index.map do |(ident, token), i|
+            TerminalAction.new(i, ident, token.code)
+        end
         # TODO ordinal
-        lexer.terminals.map do |ident, tokens|
-            positive_cases = tokens.each_with_index.map do |token, ordinal|
-                "if ordinal == #{ordinal} { #{token.code} }"
-            end
-            negative_case = "{ unreachable!() }"
-            cases = positive_cases + [negative_case]
-            code = cases.join(" else ")
-            "if terminal == grammar.sym(\"#{ident}\").unwrap() { Value::#{ident}(#{code}) }"
-        end.join(" else ")
+        # lexer.terminals.map do |ident, tokens|
+        #     positive_cases = tokens.each_with_index.map do |token, ordinal|
+        #         "if ordinal == #{ordinal} { #{token.code} }"
+        #     end
+        #     negative_case = "{ unreachable!() }"
+        #     cases = positive_cases + [negative_case]
+        #     code = cases.join(" else ")
+        #     "if terminal == parser.recognizer.sym(\"#{ident}\").unwrap() { Value::#{ident}(#{code}) }"
+        # end
+    end
+
+    def terminal_sym_names
+        all_tokens.map do |ident, token|
+            ident
+        end
     end
 
     def map_token_to_terminal
